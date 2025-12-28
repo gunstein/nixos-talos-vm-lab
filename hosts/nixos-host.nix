@@ -3,8 +3,17 @@
   services.openssh.enable = true;
   virtualisation.libvirtd.enable = true;
 
+  networking.networkmanager.enable = true;
+
+  users.users.gunstein = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" "libvirtd" "networkmanager" ];
+    packages = with pkgs; [ ];
+  };
+
   environment.systemPackages = with pkgs; [
-    libvirt qemu_kvm virt-install qemu
+    libvirt qemu_kvm qemu
+    virt-manager   # gir deg virt-install
     iproute2 iputils bridge-utils netcat-openbsd
     jq curl gnugrep gawk coreutils
     tmux
@@ -26,7 +35,7 @@
       Environment = [
         "PROFILE=lab1" # install.sh setter riktig
       ];
-      ExecStart = "/etc/nixos/talos-host/scripts/talos-bootstrap.sh";
+      ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/talos-host/scripts/talos-bootstrap.sh";
     };
   };
 }

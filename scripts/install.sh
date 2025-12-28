@@ -21,15 +21,40 @@ ISO="${REPO_DIR}/assets/metal-amd64.iso"
 
 command -v nixos-rebuild >/dev/null 2>&1 || die "nixos-rebuild mangler. Er dette en NixOS-maskin?"
 
-echo "[1/6] Copy repo -> ${TARGET}"
+echo "[1/7] Copy repo -> ${TARGET}"
 mkdir -p "$TARGET"
 rsync -a --delete "${REPO_DIR}/" "${TARGET}/"
 
-echo "[2/6] Set profile = ${PROFILE}"
+# Make the target flake self-contained on this host by copying the current HW config
+HW_SRC="/etc/nixos/hardware-configuration.nix"
+HW_DST="${TARGET}/hosts/hardware-configuration.nix"
+
+echo "[2/7] Ensure hardware-configuration.nix exists in ${TARGET}"
+[[ -f "$HW_SRC" ]] || die "Mangler ${HW_SRC}. Har du kjørt nixos-generate-config på denne maskinen?"
+
+mkdir -p "$(dirname "$HW_DST")"
+
+# Default: only create if missing.
+# If you want to force update, run: FORCE_HWCONFIG=1 ./install.sh lab1
+if [[ ! -f "$HW_DST" ]]; then
+  cp -f "$HW_SRC" "$HW_DST"
+  chmod 0644 "$HW_DST"
+  echo "  Copied ${HW_SRC} -> ${HW_DST}"
+else
+  if [[ "${FORCE_HWCONFIG:-0}" == "1" ]]; then
+    cp -f "$HW_SRC" "$HW_DST"
+    chmod 0644 "$HW_DST"
+    echo "  Updated ${HW_DST} (FORCE_HWCONFIG=1)"
+  else
+    echo "  Keeping existing ${HW_DST} (set FORCE_HWCONFIG=1 to overwrite)"
+  fi
+fi
+
+echo "[3/7] Set profile = ${PROFILE}"
 echo "$PROFILE" > "${TARGET}/PROFILE"
 chmod 0644 "${TARGET}/PROFILE"
 
-echo "[3/6] Write /etc/nixos/README.talos-host"
+echo "[4/7] Write /etc/nixos/README.talos-host"
 cat > /etc/nixos/README.talos-host <<'EOF'
 README – Talos på libvirt via flake (/etc/nixos/talos-host)
 ===========================================================
@@ -40,7 +65,7 @@ Dette systemet er satt opp slik:
       /etc/nixos/talos-host
 
   - NixOS bygges fra flake:
-      nixos-rebuild switch --flake /etc/nixos/talos-host#nixos-host
+      nixos-rebuild switch --flake path:/etc/nixos/talos-host#nixos-host
 
   - Hvilken "profil" som brukes (lab1/lab2/...) ligger her:
       cat /etc/nixos/talos-host/PROFILE
@@ -85,13 +110,13 @@ Vanlige feilsøk
 EOF
 chmod 0644 /etc/nixos/README.talos-host
 
-echo "[4/6] nixos-rebuild switch (flake)"
-nixos-rebuild switch --flake "${TARGET}#nixos-host" || die "nixos-rebuild feilet. Sjekk output over."
+echo "[5/7] nixos-rebuild switch (flake)"
+nixos-rebuild switch --flake "path:${TARGET}#nixos-host" || die "nixos-rebuild feilet. Sjekk output over."
 
-echo "[5/6] Enable + start bootstrap service"
+echo "[6/7] Enable + start bootstrap service"
 systemctl enable --now talos-bootstrap.service || die "Klarte ikke enable/start talos-bootstrap.service"
 
-echo "[6/6] Done."
+echo "[7/7] Done."
 echo "Logs:"
 echo "  journalctl -fu talos-bootstrap.service"
 echo "Info:"

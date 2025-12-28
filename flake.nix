@@ -14,16 +14,29 @@
       nixosConfigurations.nixos-host = nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
+          # 1) Dette gir fileSystems."/" og fileSystems."/boot" osv
+          ./hosts/hardware-configuration.nix
+
+          # 2) Din host-konfig (tjenester, talos bootstrap, nettverk osv)
           ./hosts/nixos-host.nix
+
+          # 3) Flake bygger ikke /etc/nixos/configuration.nix,
+          #    så vi må sette bootloader + stateVersion her (eller i nixos-host.nix)
+          ({ lib, ... }: {
+            boot.loader.systemd-boot.enable = true;
+            boot.loader.efi.canTouchEfiVariables = true;
+
+            # Viktig: slå av grub selv om noe annet prøver å enable den
+            boot.loader.grub.enable = lib.mkForce false;
+
+            system.stateVersion = "25.11";
+          })
         ];
       };
 
-      # Valgfritt: en "app" for å kjøre bootstrap manuelt med nix run
-      # (men du trenger ikke dette når du har systemd-service)
       apps.${system}.bootstrap = {
         type = "app";
         program = "${pkgs.bash}/bin/bash";
-        # usage: nix run .#bootstrap -- lab1
       };
     };
 }
