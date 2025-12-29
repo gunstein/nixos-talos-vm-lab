@@ -1,13 +1,24 @@
-#!/usr/bin/env bash
+# =====================================================================
+# FILE: /home/gunstein/nixos-talos-vm-lab/scripts/install.sh
+# (rsync -> /etc/nixos/talos-host/scripts/install.sh)
+# =====================================================================
+#!/run/current-system/sw/bin/bash
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 PROFILE="${1:-lab1}"
 
+# Optional behavior:
+#   WIPE=1       -> run wipe-lab.sh <profile> before bootstrap/provision (destructive)
+#   USE_SYSTEMD=1 -> also restart systemd units at the end (optional)
+WIPE="${WIPE:-0}"
+USE_SYSTEMD="${USE_SYSTEMD:-0}"
+
 # Re-exec as root if needed
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-  command -v sudo >/dev/null 2>&1 || die "Må kjøres som root (sudo mangler)."
+  command -v sudo >/dev/null 2>&1 || die "Must run as root (sudo is missing)."
   exec sudo -E bash "$0" "$@"
 fi
 
@@ -15,109 +26,90 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="/etc/nixos/talos-host"
 ISO="${REPO_DIR}/assets/metal-amd64.iso"
 
-[[ -f "$ISO" ]] || die "Mangler ISO: $ISO. Du må scp'e metal-amd64.iso til assets/."
-[[ -s "$ISO" ]] || die "ISO finnes men er tom (0 bytes): $ISO"
-[[ -d "${REPO_DIR}/profiles/${PROFILE}" ]] || die "Ukjent profil: ${PROFILE} (finnes ikke i profiles/)."
+HOST_HW_SRC="/etc/nixos/hardware-configuration.nix"
+HOST_HW_DST="${TARGET}/hosts/hardware-configuration.nix"
 
-command -v nixos-rebuild >/dev/null 2>&1 || die "nixos-rebuild mangler. Er dette en NixOS-maskin?"
+SECRETS_DIR="/etc/nixos/secrets"
+PASSFILE="${SECRETS_DIR}/gunstein.passwd"
 
-echo "[1/7] Copy repo -> ${TARGET}"
+[[ -d "${REPO_DIR}/profiles/${PROFILE}" ]] || die "Unknown profile: ${PROFILE} (missing profiles/${PROFILE})."
+[[ -f "$ISO" ]] || die "Missing Talos ISO: ${ISO} (copy metal-amd64.iso into assets/)."
+[[ -s "$ISO" ]] || die "Talos ISO exists but is empty (0 bytes): ${ISO}."
+[[ -f "$HOST_HW_SRC" ]] || die "Missing ${HOST_HW_SRC}. Did you run nixos-generate-config during install?"
+command -v nixos-rebuild >/dev/null 2>&1 || die "nixos-rebuild not found. Are you on NixOS?"
+
+log "[1/8] Sync repo -> ${TARGET}"
 mkdir -p "$TARGET"
-rsync -a --delete "${REPO_DIR}/" "${TARGET}/"
+rsync -a --delete --exclude '.git' "${REPO_DIR}/" "${TARGET}/"
 
-# Make the target flake self-contained on this host by copying the current HW config
-HW_SRC="/etc/nixos/hardware-configuration.nix"
-HW_DST="${TARGET}/hosts/hardware-configuration.nix"
+log "[2/8] Ensure hardware-configuration.nix exists in ${TARGET}"
+mkdir -p "$(dirname "$HOST_HW_DST")"
+cp -f "$HOST_HW_SRC" "$HOST_HW_DST"
+chmod 0644 "$HOST_HW_DST"
+log "  Copied ${HOST_HW_SRC} -> ${HOST_HW_DST}"
 
-echo "[2/7] Ensure hardware-configuration.nix exists in ${TARGET}"
-[[ -f "$HW_SRC" ]] || die "Mangler ${HW_SRC}. Har du kjørt nixos-generate-config på denne maskinen?"
+log "[3/8] Ensure password hash file exists (host-local secret)"
+mkdir -p "$SECRETS_DIR"
+chmod 0700 "$SECRETS_DIR"
 
-mkdir -p "$(dirname "$HW_DST")"
-
-# Default: only create if missing.
-# If you want to force update, run: FORCE_HWCONFIG=1 ./install.sh lab1
-if [[ ! -f "$HW_DST" ]]; then
-  cp -f "$HW_SRC" "$HW_DST"
-  chmod 0644 "$HW_DST"
-  echo "  Copied ${HW_SRC} -> ${HW_DST}"
-else
-  if [[ "${FORCE_HWCONFIG:-0}" == "1" ]]; then
-    cp -f "$HW_SRC" "$HW_DST"
-    chmod 0644 "$HW_DST"
-    echo "  Updated ${HW_DST} (FORCE_HWCONFIG=1)"
+if [[ ! -s "$PASSFILE" ]]; then
+  if grep -qE '^gunstein:' /etc/shadow; then
+    HASH="$(awk -F: '$1=="gunstein"{print $2}' /etc/shadow)"
+    if [[ -n "$HASH" ]]; then
+      printf '%s\n' "$HASH" > "$PASSFILE"
+      chmod 0600 "$PASSFILE"
+      log "  Created ${PASSFILE} from existing /etc/shadow hash."
+    else
+      printf '%s\n' '!' > "$PASSFILE"
+      chmod 0600 "$PASSFILE"
+      log "  Created ${PASSFILE} with locked password ('!'). Run: passwd gunstein"
+    fi
   else
-    echo "  Keeping existing ${HW_DST} (set FORCE_HWCONFIG=1 to overwrite)"
+    printf '%s\n' '!' > "$PASSFILE"
+    chmod 0600 "$PASSFILE"
+    log "  Created ${PASSFILE} with locked password ('!'). Run: passwd gunstein"
   fi
+else
+  log "  Found existing ${PASSFILE}"
 fi
 
-echo "[3/7] Set profile = ${PROFILE}"
+log "[4/8] Set active profile = ${PROFILE}"
 echo "$PROFILE" > "${TARGET}/PROFILE"
 chmod 0644 "${TARGET}/PROFILE"
 
-echo "[4/7] Write /etc/nixos/README.talos-host"
-cat > /etc/nixos/README.talos-host <<'EOF'
-README – Talos på libvirt via flake (/etc/nixos/talos-host)
-===========================================================
+log "[5/8] Make scripts executable"
+chmod +x "${TARGET}/scripts/"*.sh || true
 
-Dette systemet er satt opp slik:
+log "[6/8] nixos-rebuild switch (flake) (non-fatal if units fail)"
+set +e
+nixos-rebuild switch --flake "path:${TARGET}#nixos-host"
+REBUILD_RC=$?
+set -e
+if [[ $REBUILD_RC -ne 0 ]]; then
+  log "WARN: nixos-rebuild returned rc=$REBUILD_RC (often caused by failing systemd units). Continuing with deterministic scripts..."
+fi
 
-  - All konfig og scripts ligger her:
-      /etc/nixos/talos-host
+# Prevent restart-loop/rate-limit from masking real failures
+systemctl reset-failed talos-bootstrap.service talos-provision.service >/dev/null 2>&1 || true
 
-  - NixOS bygges fra flake:
-      nixos-rebuild switch --flake path:/etc/nixos/talos-host#nixos-host
+log "[7/8] Optional wipe (destructive) + deterministic bootstrap/provision"
+if [[ "$WIPE" == "1" ]]; then
+  log "WIPE=1 -> wiping profile '${PROFILE}'"
+  "${TARGET}/scripts/wipe-lab.sh" "$PROFILE"
+else
+  log "WIPE=0 -> skipping wipe"
+fi
 
-  - Hvilken "profil" som brukes (lab1/lab2/...) ligger her:
-      cat /etc/nixos/talos-host/PROFILE
+"${TARGET}/scripts/talos-bootstrap.sh" "$PROFILE"
+"${TARGET}/scripts/talos-provision.sh" "$PROFILE"
 
-Profiler
---------
-Profiler er i:
-  /etc/nixos/talos-host/profiles/<profil>/
+log "[8/8] Optional systemd restart (not required)"
+if [[ "$USE_SYSTEMD" == "1" ]]; then
+  systemctl restart talos-bootstrap.service || true
+  systemctl restart talos-provision.service || true
+  log "USE_SYSTEMD=1 -> restarted talos-bootstrap/provision units"
+else
+  log "USE_SYSTEMD=0 -> not restarting units"
+fi
 
-Typisk inneholder en profil:
-  - vars.env    (nett, subnet, paths, kubeconfig-output)
-  - nodes.csv   (Talos VM-noder: start med 1 node, legg til flere ved å uncommente/legge til linjer)
-
-Bootstrap
----------
-Bootstrap kjører som systemd-service:
-  systemctl status talos-bootstrap.service
-  journalctl -fu talos-bootstrap.service
-
-Manuell re-run (idempotent):
-  systemctl start talos-bootstrap.service
-
-Verifisering
-------------
-  /etc/nixos/talos-host/scripts/talos-verify.sh <profil>
-
-Kubeconfig per profil (eksempel):
-  kubectl --kubeconfig /root/.kube/talos-lab-1.config get nodes -o wide
-
-Vanlige feilsøk
----------------
-- Sjekk libvirt nett og VMer:
-    virsh --connect qemu:///system net-list --all
-    virsh --connect qemu:///system list --all
-
-- Sjekk DHCP-leases (på riktig nett):
-    virsh --connect qemu:///system net-dhcp-leases <talosnetNavn>
-
-- Sjekk porter:
-    nc -vz <cp1-ip> 50000
-    nc -vz <cp1-ip> 6443
-EOF
-chmod 0644 /etc/nixos/README.talos-host
-
-echo "[5/7] nixos-rebuild switch (flake)"
-nixos-rebuild switch --flake "path:${TARGET}#nixos-host" || die "nixos-rebuild feilet. Sjekk output over."
-
-echo "[6/7] Enable + start bootstrap service"
-systemctl enable --now talos-bootstrap.service || die "Klarte ikke enable/start talos-bootstrap.service"
-
-echo "[7/7] Done."
-echo "Logs:"
-echo "  journalctl -fu talos-bootstrap.service"
-echo "Info:"
-echo "  cat /etc/nixos/README.talos-host"
+log "Done."

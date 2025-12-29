@@ -1,10 +1,10 @@
-name,role,ip,mac,disk_gb,ram_mb,vcpus
-talos-cp-1,controlplane,192.168.123.113,52:54:00:04:80:de,20,2048,2
+name,role,mac,ip,vcpus,ram_mb,disk_gb
+talos-cp-1,controlplane,52:54:00:04:80:de,192.168.123.113,2,2048,20
 
-# --- Utvidelse: uncomment/legg til ---
-# talos-w-1,worker,192.168.123.121,52:54:00:04:80:11,20,2048,2
-# talos-w-2,worker,192.168.123.122,52:54:00:04:80:12,20,2048,2
+# --- Expansion: uncomment/add ---
+# talos-w-1,worker,52:54:00:04:80:11,192.168.123.121,2,2048,20
+# talos-w-2,worker,52:54:00:04:80:12,192.168.123.122,2,2048,20
 #
-# --- Utvidelse til 3 controlplanes (avansert / senere) ---
-# talos-cp-2,controlplane,192.168.123.114,52:54:00:04:80:df,20,2048,2
-# talos-cp-3,controlplane,192.168.123.115,52:54:00:04:80:e0,20,2048,2
+# --- 3 control planes (advanced / later) ---
+# talos-cp-2,controlplane,52:54:00:04:80:df,192.168.123.114,2,2048,20
+# talos-cp-3,controlplane,52:54:00:04:80:e0,192.168.123.115,2,2048,20
