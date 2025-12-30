@@ -12,8 +12,14 @@ require_root() {
 
 require_root "$@"
 
-PROFILE="${1:-}"
-[[ -n "$PROFILE" ]] || die "Usage: sudo ./scripts/install.sh <profile>  (e.g. lab1|lab2)"
+# Best practice:
+# - install.sh is deploy + rebuild only (no lab selection, no lab execution)
+# - labs are controlled explicitly via scripts/lab
+
+# Backwards compatibility: allow an optional argument but ignore it.
+if [[ $# -ge 1 ]]; then
+  log "WARN: install.sh no longer takes a <profile>. Ignoring argument(s): $*"
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="/etc/nixos/talos-host"
@@ -28,14 +34,11 @@ ISO_DST="${TARGET}/assets/${ISO_NAME}"
 log "Sync repo -> ${TARGET}"
 mkdir -p "$TARGET"
 
-# Keep your existing rsync style. If you already exclude *.iso/assets, that's OK,
-# because we will explicitly copy ISO afterwards.
+# Keep rsync deploy model.
+# If you later add large artifacts to .gitignore, they will not be deployed unless explicitly copied.
 rsync -a --delete \
   --exclude '.git/' \
   "${REPO_ROOT}/" "${TARGET}/"
-
-log "Write active profile"
-echo "$PROFILE" > "${TARGET}/PROFILE"
 
 log "Ensure hardware-configuration.nix is present"
 mkdir -p "$(dirname "$HW_DST")"
@@ -47,28 +50,33 @@ mkdir -p /etc/nixos/secrets
 
 log "Make scripts executable"
 chmod +x "${TARGET}/scripts/"*.sh 2>/dev/null || true
+chmod +x "${TARGET}/scripts/lab" 2>/dev/null || true
+chmod +x "${TARGET}/scripts/steps/"*.sh 2>/dev/null || true
 
 log "Ensure Talos ISO is present in deploy tree"
 mkdir -p "${TARGET}/assets"
 
-# Source of truth: your repo path in /home/gunstein/nixos-talos-vm-lab/assets
-[[ -f "$ISO_REPO" ]] || die "Missing ISO in repo: ${ISO_REPO}"
-
-# Always (re)copy to deploy target so lab.sh can find it at /etc/nixos/talos-host/assets
-install -m 0644 "$ISO_REPO" "$ISO_DST"
-log "ISO OK: ${ISO_DST}"
+if [[ -f "$ISO_REPO" ]]; then
+  # Always (re)copy to deploy target so scripts can find it at /etc/nixos/talos-host/assets
+  install -m 0644 "$ISO_REPO" "$ISO_DST"
+  log "ISO OK: ${ISO_DST}"
+else
+  log "WARN: ISO not found in repo: ${ISO_REPO}"
+  log "WARN: If your scripts require an ISO, place it at: ${ISO_REPO}"
+  log "WARN: (We do not store ISOs in git; they are treated as build artifacts.)"
+fi
 
 log "nixos-rebuild switch"
 nixos-rebuild switch --flake "path:${TARGET}#nixos-host"
 
 log "Done."
 log ""
-log "Next steps (choose ONE path):"
+log "Next steps (explicit lab control):"
+log "  sudo ${TARGET}/scripts/lab lab1 all"
+log "  sudo ${TARGET}/scripts/lab lab2 all"
 log ""
-log "A) Recommended if this is the first run for this profile, or if you've had errors/drift:"
-log "   sudo ${TARGET}/scripts/lab.sh ${PROFILE} wipe"
-log "   sudo ${TARGET}/scripts/lab.sh ${PROFILE} all"
+log "Switch labs safely (wipes both source + target first):"
+log "  sudo ${TARGET}/scripts/lab switch lab1 lab2"
 log ""
-log "B) Minimal steps if you're confident the profile is already clean:"
-log "   sudo ${TARGET}/scripts/lab.sh ${PROFILE} up"
-log "   sudo ${TARGET}/scripts/lab.sh ${PROFILE} provision"
+log "Diagnostics:"
+log "  sudo ${TARGET}/scripts/lab lab1 diag"
