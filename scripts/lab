@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  sudo ./scripts/lab <lab> <cmd>
+
+Commands:
+  up         Bring up libvirt network + VMs (delegates to existing lab.sh up/all)
+  provision  Run Talos provisioning (delegates)
+  verify     Verify Talos/Kubernetes health (delegates)
+  all        up + provision + verify (delegates to existing lab.sh all)
+  wipe       Destroy VMs/disks/network/state for the lab (delegates)
+  diag       Show diagnostics (delegates)
+
+Extra:
+  sudo ./scripts/lab switch <fromLab> <toLab>
+    - Wipes fromLab
+    - Wipes toLab (important to avoid "VM exists: skip create" issues)
+    - Starts toLab (all)
+
+Examples:
+  sudo ./scripts/lab lab1 all
+  sudo ./scripts/lab lab2 wipe
+  sudo ./scripts/lab switch lab1 lab2
+EOF
+}
+
+cmd="${2:-}"
+lab="${1:-}"
+
+if [[ "${lab:-}" == "--help" || "${lab:-}" == "-h" || -z "${lab:-}" ]]; then
+  usage
+  exit 0
+fi
+
+# Switch is special: scripts/lab switch lab1 lab2
+if [[ "$lab" == "switch" ]]; then
+  as_root "$@"
+  from="${2:-}"; to="${3:-}"
+  [[ -n "$from" && -n "$to" ]] || die "Usage: sudo ./scripts/lab switch <fromLab> <toLab>"
+
+  log "Switching labs: ${from} -> ${to}"
+  log "Step 1/3: wipe ${from}"
+  "$(script_path scripts/lab.sh)" "$from" wipe
+
+  log "Step 2/3: wipe ${to} (avoids stale VM definitions)"
+  "$(script_path scripts/lab.sh)" "$to" wipe || true
+
+  log "Step 3/3: start ${to}"
+  "$(script_path scripts/lab.sh)" "$to" all
+  exit 0
+fi
+
+[[ -n "${cmd:-}" ]] || { usage; exit 1; }
+
+as_root "$@"
+
+# Prefer using the old, battle-tested scripts you already have (least risk).
+OLD_LAB_SH="$(script_path scripts/lab.sh)"
+
+case "$cmd" in
+  up)
+    # If your old lab.sh has "up", use it; otherwise fall back to "all".
+    if "$OLD_LAB_SH" "$lab" up >/dev/null 2>&1; then
+      "$OLD_LAB_SH" "$lab" up
+    else
+      log "WARN: old lab.sh has no 'up' command; running 'all' instead."
+      "$OLD_LAB_SH" "$lab" all
+    fi
+    ;;
+  provision)
+    # Use dedicated provision script if present, else run old "provision" if supported.
+    if [[ -f "$(script_path scripts/talos-provision.sh)" ]]; then
+      "$(script_path scripts/talos-provision.sh)" "$lab"
+    else
+      "$OLD_LAB_SH" "$lab" provision
+    fi
+    ;;
+  verify)
+    if [[ -f "$(script_path scripts/verify.sh)" ]]; then
+      "$(script_path scripts/verify.sh)" "$lab"
+    else
+      "$OLD_LAB_SH" "$lab" verify
+    fi
+    ;;
+  all)
+    "$OLD_LAB_SH" "$lab" all
+    # Many setups already verify inside 'all'; keep verify explicit if user wants.
+    ;;
+  wipe)
+    "$OLD_LAB_SH" "$lab" wipe
+    ;;
+  diag)
+    if [[ -f "$(script_path scripts/diag.sh)" ]]; then
+      "$(script_path scripts/diag.sh)" "$lab"
+    else
+      log "No diag.sh found; showing basic virsh status:"
+      virsh -c qemu:///system net-list --all || true
+      virsh -c qemu:///system list --all || true
+    fi
+    ;;
+  *)
+    usage
+    die "Unknown command: $cmd"
+    ;;
+esac
