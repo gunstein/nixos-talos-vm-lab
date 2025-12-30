@@ -24,11 +24,11 @@ CMD="${2:-}"
 load_profile "$PROFILE"
 csv_init
 
-ISO_CACHE="/var/lib/libvirt/images/metal-amd64.iso"
+ISO_CACHE="${DISK_DIR}/metal-amd64.iso"
 
 vm_disk_path() {
   local name="$1"
-  echo "/var/lib/libvirt/images/talos-${name}.qcow2"
+  echo "${DISK_DIR}/talos-${name}.qcow2"
 }
 
 net_bridge_of() {
@@ -55,6 +55,7 @@ debug_net_map() {
 }
 
 ensure_iso_cache() {
+  ensure_disk_dir
   if [[ -f "$ISO_CACHE" ]]; then
     return 0
   fi
@@ -200,6 +201,8 @@ vm_create() {
   local name="$1" disk_gb="$2" ram_mb="$3" vcpus="$4" mac="$5"
   local disk
   disk="$(vm_disk_path "$name")"
+
+  ensure_disk_dir
 
   if [[ ! -f "$disk" ]]; then
     log "Create disk $disk (${disk_gb}G)"

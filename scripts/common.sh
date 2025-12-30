@@ -37,6 +37,9 @@ ISO=""
 
 DISK_DIR="/var/lib/libvirt/images"
 
+# NEW: make fresh/snapshot-revert hosts idempotent
+ensure_disk_dir() { mkdir -p "${DISK_DIR}"; }
+
 load_profile() {
   PROFILE="${1:-}"
   [[ -n "$PROFILE" ]] || die "Usage: <script> <profile> (e.g. lab1|lab2)"
@@ -80,8 +83,8 @@ load_profile() {
   if [[ -z "${ISO:-}" ]]; then
     if [[ -f "${ROOT}/assets/metal-amd64.iso" ]]; then
       ISO="${ROOT}/assets/metal-amd64.iso"
-    elif [[ -f "/var/lib/libvirt/images/metal-amd64.iso" ]]; then
-      ISO="/var/lib/libvirt/images/metal-amd64.iso"
+    elif [[ -f "${DISK_DIR}/metal-amd64.iso" ]]; then
+      ISO="${DISK_DIR}/metal-amd64.iso"
     else
       ISO="${ROOT}/assets/metal-amd64.iso"
     fi
