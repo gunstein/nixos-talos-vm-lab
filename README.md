@@ -1,126 +1,216 @@
-# NixOS Talos VM Lab (nested libvirt)
+# NixOS + Talos Kubernetes Lab
 
-This repo configures a **NixOS “host VM”** that runs **libvirt** and provisions **Talos Linux** inside **nested VMs**. The repo is designed to be **profile-driven** (lab1/lab2/…) and **maintainable without AI**: small scripts, clear inputs, predictable outputs.
+This repository sets up **Talos Kubernetes clusters as VMs on a NixOS host**
+using `libvirt/virsh` and a small set of shell scripts.
 
-**Architecture (quick mental model):** Outer hypervisor → runs `nixos-host` VM → inside `nixos-host` we run libvirt/QEMU → libvirt runs Talos VMs (control plane + optional workers). A profile defines libvirt network name/bridge/subnet and node specs (VM name, MAC, IP, resources).
+The setup is designed for **reproducibility, experimentation, and debugging** —
+not for running many clusters in parallel.
 
-**Repository layout:**
-```
-.
-├─ flake.nix
-├─ hosts/
-│  └─ nixos-host.nix
-├─ assets/
-│  └─ metal-amd64.iso
-├─ profiles/
-│  ├─ lab1/
-│  │  ├─ vars.env
-│  │  └─ nodes.csv
-│  └─ lab2/
-│     ├─ vars.env
-│     └─ nodes.csv
-└─ scripts/
-   ├─ install.sh
-   ├─ lab.sh
-   ├─ talos-provision.sh
-   ├─ verify.sh
-   ├─ diag.sh
-   └─ common.sh
-```
+---
 
-**Deploy locations on the NixOS host VM:** You work in `/home/gunstein/nixos-talos-vm-lab`. `install.sh` syncs the repo to `/etc/nixos/talos-host` and then runs `nixos-rebuild switch` from that flake tree. The scripts you run after deploy live at `/etc/nixos/talos-host/scripts/...`.
+## Architecture Overview
 
-**IMPORTANT (nested libvirt can kill SSH):** In nested environments, libvirt’s `default` NAT network often uses `192.168.122.0/24` on `virbr0`. If your NixOS host VM itself is managed over `192.168.122.0/24` (common; e.g. you SSH to `192.168.122.161`), starting libvirt’s default network can create a route conflict and drop SSH. This repo disables/removes the libvirt `default` network on boot (and removes `virbr0` if it lingers). If SSH drops right after enabling libvirt or starting networks, suspect `default/virbr0` first and confirm with `ip route` + `virsh net-list --all`.
+- **NixOS VM** acts as the *host*
+- The host runs **Talos Linux** inside libvirt VMs
+- Each *lab* (`lab1`, `lab2`, …):
+  - is fully isolated
+  - has its own libvirt network
+  - has its own Talos state directory
+  - has its own kubeconfig file
+- Labs are intended to be run **one at a time**
 
-**Workflow (the intended stable path):**
+> ⚠️ Important  
+> The scripts are **not designed for multiple labs running simultaneously**
+> on a small host VM.  
+> Always *wipe* before switching labs.
 
-1) Deploy host configuration and select profile:
+---
+
+## Important Paths
+
+- `/etc/nixos/talos-host/` – deployed repo and scripts
+- `/var/lib/talos-lab-*` – Talos state per lab
+- `/var/lib/libvirt/images/` – VM disks
+- `~/.kube/talos-lab-*.config` – kubeconfig per lab
+
+---
+
+## Basic Workflow
+
+### Start a lab (clean start)
+
 ```bash
-sudo ./scripts/install.sh lab1
-# or
-sudo ./scripts/install.sh lab2
-```
-This: syncs repo → `/etc/nixos/talos-host`, writes active profile marker, ensures Talos ISO exists in deploy tree, runs `nixos-rebuild switch` (flake). It does **not** create VMs by itself.
-
-2) Clean + provision a profile (recommended):
-```bash
-sudo /etc/nixos/talos-host/scripts/lab.sh lab2 wipe
-sudo /etc/nixos/talos-host/scripts/lab.sh lab2 all
-```
-- `wipe` is destructive for that profile (VMs, disks, libvirt network, generated Talos state, kubeconfig).
-- `all` runs `up` (network + VMs) then `provision` (generate config, apply-config, bootstrap, kubeconfig, wait for API).
-
-3) Verify:
-```bash
-sudo /etc/nixos/talos-host/scripts/verify.sh lab2
-```
-This should confirm Talos API reachable, Kubernetes API reachable, `kubectl get nodes` works, and the control plane becomes Ready.
-
-4) Diagnose (if something is wrong):
-```bash
-sudo /etc/nixos/talos-host/scripts/diag.sh lab2
-```
-This prints libvirt networks + bridge + routes, VM state + disks + NICs, DHCP leases, port checks (50000/6443), QEMU log tail, and best-effort `talosctl`/`kubectl` checks.
-
-**Switching between lab1 and lab2:** Both profiles can remain in the repo. Switching is selecting a different profile and running the corresponding commands. Recommended safe switch (not running both at once):
-```bash
-# stop/delete lab1 resources (optional but recommended when switching labs)
-sudo /etc/nixos/talos-host/scripts/lab.sh lab1 wipe
-
-# deploy host config with lab2 active
-sudo ./scripts/install.sh lab2
-
-# bring up lab2 cleanly
-sudo /etc/nixos/talos-host/scripts/lab.sh lab2 wipe
-sudo /etc/nixos/talos-host/scripts/lab.sh lab2 all
-```
-Notes: You don’t need lab1 and lab2 running simultaneously. Each profile should use its own unique bridge name (e.g. `virbr-talosnet1`, `virbr-talosnet2`) to avoid collisions. The scripts attempt to resolve bridge conflicts automatically, but keeping profiles separate remains best practice.
-
-**ISO handling:** Put the Talos ISO at `assets/metal-amd64.iso`. `install.sh` ensures it exists at `/etc/nixos/talos-host/assets/metal-amd64.iso`. `lab.sh` copies it to a libvirt-friendly cache path: `/var/lib/libvirt/images/metal-amd64.iso`.
-
-**Outputs:** Per profile, generated Talos config is written under `${TALOS_DIR}/generated/` (`controlplane.yaml`, `worker.yaml`, `talosconfig`). Kubeconfig is written to a profile-specific root path (e.g. `/root/.kube/talos-lab-X.config`) and also to `/home/<user>/.kube/config` for convenience.
-
-**Monitoring tips (use another terminal):**
-```bash
-watch -n1 "virsh -c qemu:///system net-list --all; echo; virsh -c qemu:///system list --all"
-```
-Useful network checks (especially if SSH behaves oddly):
-```bash
-ip route
-ip addr
-```
-VM logs:
-```bash
-tail -n 200 /var/log/libvirt/qemu/<vmname>.log
-```
-
-**Disk pressure (NixOS host VM gets full):** Common causes are `/nix/store` growth (many rebuilds), journal logs, and libvirt images. Cleanup:
-```bash
-sudo nix-collect-garbage -d
-sudo journalctl --vacuum-time=7d
-sudo journalctl --vacuum-size=200M
-```
-Find large directories:
-```bash
-sudo du -xh /nix/store --max-depth=1 | sort -h | tail -n 20
-sudo du -xh /var/lib/libvirt/images --max-depth=1 | sort -h | tail -n 20
-sudo du -xh /var/log --max-depth=2 | sort -h | tail -n 20
-```
-
-**Design goals:** Profile-driven configuration (no magic global state), scripts are small and readable, deterministic “wipe → all → verify”, and debug output that points to the actual failing component (network, VM boot, Talos API, kube-apiserver).
-
-**Common commands summary:**
-```bash
-# deploy host config for a profile
-sudo ./scripts/install.sh lab1
-
-# clean + provision a profile
 sudo /etc/nixos/talos-host/scripts/lab.sh lab1 wipe
 sudo /etc/nixos/talos-host/scripts/lab.sh lab1 all
+```
 
-# verify
-sudo /etc/nixos/talos-host/scripts/verify.sh lab1
+---
 
-# diagnose
+### Switch from lab1 → lab2 (recommended & safe)
+
+```bash
+sudo /etc/nixos/talos-host/scripts/lab.sh lab1 wipe
+sudo /etc/nixos/talos-host/scripts/lab.sh lab2 wipe
+sudo /etc/nixos/talos-host/scripts/lab.sh lab2 all
+```
+
+Why wipe the *target lab* as well?
+
+- `lab.sh` **reuses existing VMs if they exist**
+- Old VM definitions may have:
+  - wrong network
+  - wrong MAC address
+  - stale disk / broken Talos state
+- This causes Talos API (`:50000`) to never come up
+
+Wiping guarantees a clean, correct VM definition.
+
+---
+
+## Diagnostic & Verification Tools
+
+### `diag.sh` — Host & lab diagnostics
+
+Use this when:
+- a lab fails to start
+- Talos API is not reachable
+- you want a quick system overview
+
+Example:
+
+```bash
 sudo /etc/nixos/talos-host/scripts/diag.sh lab1
 ```
+
+Typical output includes:
+- running libvirt networks and VMs
+- Talos state directories
+- disk usage and memory
+- kubeconfig paths
+- basic network information
+
+This script is **read-only** and safe to run at any time.
+
+---
+
+### `verify.sh` — Talos & Kubernetes verification
+
+Use this after a lab has started to verify it is actually healthy.
+
+Example:
+
+```bash
+sudo /etc/nixos/talos-host/scripts/verify.sh lab1
+```
+
+Typical checks:
+- Talos API reachability
+- `talosctl health`
+- Kubernetes API access
+- `kubectl get nodes`
+- basic cluster sanity checks
+
+If `verify.sh` fails, the lab is **not usable yet**, even if VMs appear running.
+
+---
+
+## Common Commands
+
+### Which lab am I connected to?
+
+```bash
+kubectl cluster-info
+kubectl get nodes -o wide
+```
+
+- `192.168.123.x` → lab1
+- `192.168.124.x` → lab2
+
+---
+
+### Which VMs are running?
+
+```bash
+sudo virsh -c qemu:///system list --all
+```
+
+---
+
+### DHCP / IP debugging
+
+```bash
+sudo virsh -c qemu:///system net-dhcp-leases talosnet1
+sudo virsh -c qemu:///system net-dhcp-leases talosnet2
+```
+
+---
+
+### Talos console access
+
+```bash
+sudo virsh -c qemu:///system console talos1-cp-1
+# exit with Ctrl+]
+```
+
+---
+
+## Common Problems & Fixes
+
+### ❌ `Talos API not reachable :50000`
+
+**Cause**
+- VM already existed and was reused
+- VM definition does not match current lab config
+
+**Fix**
+```bash
+sudo /etc/nixos/talos-host/scripts/lab.sh <lab> wipe
+sudo /etc/nixos/talos-host/scripts/lab.sh <lab> all
+```
+
+---
+
+### ❌ SSH session drops when starting a lab
+
+**Cause**
+- `install.sh` runs `nixos-rebuild switch`
+- network restart or OOM kills ssh
+
+**Fix**
+- Use `install.sh` **only** when Nix config changes
+- Use `lab.sh` for daily lab operations
+
+---
+
+### ❌ NixOS host disk fills up
+
+Clean unused Nix store data:
+
+```bash
+sudo nix-collect-garbage -d
+sudo nix-store --optimise
+```
+
+---
+
+## Key Rules (Short Version)
+
+- ✅ Run **one lab at a time**
+- ✅ Always wipe before `all` if a lab may exist
+- ❌ Do not trust existing VM definitions
+- ❌ Do not use `install.sh` to switch labs
+
+---
+
+## Future Improvements (Ideas)
+
+- Make `lab.sh` VM handling idempotent:
+  - verify network + MAC
+  - auto-recreate VM on mismatch
+- Add `switch-lab.sh` helper
+- Improve logging during `wait_port`
+
+---
+
+This repository is intentionally **lab-focused**, not production-ready,
+but provides strong control and visibility into Talos + Kubernetes behavior.
