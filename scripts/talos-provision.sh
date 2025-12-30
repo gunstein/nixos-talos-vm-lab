@@ -1,341 +1,241 @@
-# =====================================================================
-# FILE: /home/gunstein/nixos-talos-vm-lab/scripts/talos-provision.sh
-# (rsync -> /etc/nixos/talos-host/scripts/talos-provision.sh)
-# =====================================================================
 #!/run/current-system/sw/bin/bash
 set -euo pipefail
+source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-export PATH="/run/current-system/sw/bin:/run/wrappers/bin:${PATH:-}"
+require_root "$@"
+need talosctl
+need mkdir
+need awk
+need nc
+need sleep
+need rm
+need grep
+need mktemp
+need cp
+need chmod
+need chown
+need getent
+need cut
+need id
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
-die() { echo "ERROR: $*" >&2; exit 1; }
-
-require() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
-for c in talosctl awk tr nc grep sed sleep mktemp mkdir rm chmod ln virsh; do require "$c"; done
-
-LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
-
-ROOT="/etc/nixos/talos-host"
-PROFILE_FILE="${ROOT}/PROFILE"
-
-PROFILE="${1:-}"
-if [[ -z "$PROFILE" ]]; then
-  [[ -f "$PROFILE_FILE" ]] || die "Missing $PROFILE_FILE"
-  PROFILE="$(cat "$PROFILE_FILE")"
+# kubectl is optional but recommended; if missing we will warn and skip k8s readiness waits.
+if command -v kubectl >/dev/null 2>&1; then
+  HAVE_KUBECTL=1
+else
+  HAVE_KUBECTL=0
 fi
 
-PROFILE_DIR="${ROOT}/profiles/${PROFILE}"
-VARS_ENV="${PROFILE_DIR}/vars.env"
-NODES_CSV="${PROFILE_DIR}/nodes.csv"
-[[ -f "$NODES_CSV" ]] || die "Missing nodes.csv: $NODES_CSV"
+load_profile "${1:-}"
+csv_init
 
-if [[ -f "$VARS_ENV" ]]; then
-  # shellcheck disable=SC1090
-  source "$VARS_ENV"
-fi
+GEN_DIR="${TALOS_DIR}/generated"
+mkdir -p "$GEN_DIR"
 
-CLUSTER_NAME="${TALOS_CLUSTER_NAME:-talos-${PROFILE}}"
-STATE_DIR="${TALOS_DIR:-/var/lib/talos-${PROFILE}}"
-KUBECONFIG_OUT="${KUBECONFIG_OUT:-/root/.kube/talos-${PROFILE}.config}"
-
-# THIS is the key bit for install-to-disk determinism:
-INSTALL_DISK="${TALOS_INSTALL_DISK:-/dev/vda}"   # virtio disk is usually /dev/vda
-
-CFG_DIR="${STATE_DIR}/generated"
-NODECFG_DIR="${STATE_DIR}/node-configs"
-
-mkdir -p "$CFG_DIR" "$NODECFG_DIR"
-chmod 0700 "$STATE_DIR" || true
-
-declare -A COL=()
-
-csv_init() {
-  local header
-  header="$(head -n1 "$NODES_CSV" | tr -d '\r')"
-  IFS=',' read -r -a cols <<<"$header"
-  local i
-  for i in "${!cols[@]}"; do
-    COL["${cols[$i]}"]="$i"
-  done
-  for req in name role ip mac disk_gb ram_mb vcpus; do
-    [[ -n "${COL[$req]:-}" ]] || die "nodes.csv missing required column: '$req' (header is: $header)"
-  done
-}
-
-csv_rows() {
-  tail -n +2 "$NODES_CSV" | while IFS= read -r line; do
-    line="${line%$'\r'}"
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    echo "$line"
-  done
-}
-
-csv_get() {
-  local line="$1" key="$2"
-  IFS=',' read -r -a f <<<"$line"
-  local idx="${COL[$key]}"
-  echo "${f[$idx]}"
-}
-
-wait_port() {
-  local ip="$1" port="$2" timeout="${3:-900}"
-  local deadline=$((SECONDS + timeout))
-  while (( SECONDS < deadline )); do
-    if nc -vz "$ip" "$port" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1
-}
-
-first_controlplane_ip() {
-  while IFS= read -r r; do
-    if [[ "$(csv_get "$r" role)" == "controlplane" ]]; then
-      echo "$(csv_get "$r" ip)"
-      return 0
-    fi
-  done < <(csv_rows)
-  return 1
-}
-
-talos_insecure_flag_for() {
-  local cmd="$1"
-  if talosctl "$cmd" --help 2>/dev/null | grep -q -- '--insecure-skip-verify'; then
-    echo "--insecure-skip-verify"; return 0
-  fi
-  if talosctl "$cmd" --help 2>/dev/null | grep -q -- '--insecure'; then
-    echo "--insecure"; return 0
-  fi
-  echo ""
-}
-
-talos_try() {
-  local cmd="$1"; shift
-  talosctl --talosconfig "${CFG_DIR}/talosconfig" "$cmd" "$@"
-}
-
-talos_try_insecure() {
-  local cmd="$1"; shift
-  local flag
-  flag="$(talos_insecure_flag_for "$cmd")"
-  [[ -n "$flag" ]] || return 127
-  talosctl --talosconfig "${CFG_DIR}/talosconfig" "$cmd" "$flag" "$@"
-}
-
-talos_run_with_fallback() {
-  local cmd="$1"; shift
-  local tmp rc err
-  tmp="$(mktemp)"
-  if talos_try "$cmd" "$@" 2> "$tmp"; then
-    rm -f "$tmp"; return 0
-  fi
-  rc=$?
-  err="$(cat "$tmp" || true)"
-  rm -f "$tmp"
-
-  if echo "$err" | grep -qiE 'x509:|certificate|authentication handshake failed|unknown authority'; then
-    local flag
-    flag="$(talos_insecure_flag_for "$cmd")"
-    if [[ -n "$flag" ]]; then
-      log "Secure '${cmd}' failed due to TLS; retrying with ${flag}..."
-      talos_try_insecure "$cmd" "$@"
-      return $?
-    fi
-  fi
-
-  echo "$err" >&2
-  return $rc
-}
-
-talos_tls_ok() {
-  local ip="$1"
-  talosctl --talosconfig "${CFG_DIR}/talosconfig" version --nodes "$ip" --endpoints "$ip" >/dev/null 2>&1
-}
-
-wait_talos_tls_ok() {
-  local ip="$1" timeout="${2:-600}"
-  local deadline=$((SECONDS + timeout))
-  while (( SECONDS < deadline )); do
-    if talos_tls_ok "$ip"; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1
-}
-
-gen_base_configs_if_missing() {
-  local cp_ip="$1"
-  if [[ -s "${CFG_DIR}/talosconfig" && -s "${CFG_DIR}/controlplane.yaml" && -s "${CFG_DIR}/worker.yaml" ]]; then
-    log "Talos base configs already exist in ${CFG_DIR}."
-    return 0
-  fi
-
-  log "Generating Talos base configs: cluster=${CLUSTER_NAME}, endpoint=https://${cp_ip}:6443"
-  rm -f "${CFG_DIR}/talosconfig" "${CFG_DIR}/controlplane.yaml" "${CFG_DIR}/worker.yaml" || true
-  (cd "$CFG_DIR" && talosctl gen config "$CLUSTER_NAME" "https://${cp_ip}:6443")
-
-  [[ -s "${CFG_DIR}/talosconfig" ]] || die "talosconfig was not generated."
-  [[ -s "${CFG_DIR}/controlplane.yaml" ]] || die "controlplane.yaml was not generated."
-  [[ -s "${CFG_DIR}/worker.yaml" ]] || die "worker.yaml was not generated."
-}
-
-make_node_config() {
-  local name="$1" role="$2" mac="$3"
-
-  local base
+# Find first controlplane node (name + ip)
+CP_IP=""
+CP_NAME=""
+while IFS= read -r row; do
+  role="$(csv_get "$row" role)"
   if [[ "$role" == "controlplane" ]]; then
-    base="${CFG_DIR}/controlplane.yaml"
-  else
-    base="${CFG_DIR}/worker.yaml"
+    CP_IP="$(csv_get "$row" ip)"
+    CP_NAME="$(csv_get "$row" name)"
+    break
   fi
+done < <(csv_rows)
+[[ -n "$CP_IP" && -n "$CP_NAME" ]] || die "No controlplane node found in nodes.csv (role=controlplane)"
 
-  local patch="${NODECFG_DIR}/${name}.patch.yaml"
-  local out="${NODECFG_DIR}/${name}.yaml"
+talos_ok() {
+  # Only true when Talos API is usable with our TALOSCONFIG (mTLS), not just port open
+  talosctl --nodes "$1" --endpoints "$1" version >/dev/null 2>&1
+}
 
-  # IMPORTANT:
-  # - interface select by MAC
-  # - FORCE install to disk (virtio -> /dev/vda by default)
-  cat > "$patch" <<EOF
+wait_talos_ok() {
+  local ip="$1" timeout_s="${2:-300}"
+  local start now
+  start="$(date +%s)"
+  while true; do
+    if talos_ok "$ip"; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout_s )); then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+supports_flag() {
+  local subcmd="$1" flag="$2"
+  $subcmd --help 2>/dev/null | grep -q -- "$flag"
+}
+
+k8s_readyz_ok() {
+  # returns 0 when apiserver returns "ok" on /readyz
+  kubectl --kubeconfig "$KUBECONFIG_OUT" get --raw='/readyz' >/dev/null 2>&1
+}
+
+wait_k8s_readyz() {
+  local timeout_s="${1:-600}"
+  local start now
+  start="$(date +%s)"
+  while true; do
+    if k8s_readyz_ok; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout_s )); then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+node_ready_status() {
+  # prints True/False/Unknown/empty
+  kubectl --kubeconfig "$KUBECONFIG_OUT" get node "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
+}
+
+wait_node_ready() {
+  local node="$1" timeout_s="${2:-600}"
+  local start now st
+  start="$(date +%s)"
+  while true; do
+    st="$(node_ready_status "$node")"
+    if [[ "$st" == "True" ]]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout_s )); then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# Patch to ensure install to disk in VM labs (metal installer ISO)
+PATCH_FILE="$(mktemp)"
+cat > "$PATCH_FILE" <<'EOF'
 machine:
   install:
-    disk: "${INSTALL_DISK}"
-  network:
-    interfaces:
-      - deviceSelector:
-          hardwareAddr: "${mac}"
-        dhcp: true
+    disk: /dev/vda
 EOF
 
-  talosctl machineconfig patch "$base" --patch @"$patch" --output "$out" >/dev/null
-  chmod 0600 "$patch" "$out"
-  echo "$out"
-}
+log "Generating Talos configs in $GEN_DIR"
+rm -f "$GEN_DIR"/{controlplane.yaml,worker.yaml,talosconfig} 2>/dev/null || true
 
-# After Talos is installed and TLS works, we *must* stop booting ISO.
-finalize_boot_from_disk() {
-  local vm="$1"
+if supports_flag "talosctl gen config" "--config-patch"; then
+  talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" \
+    --output-dir "$GEN_DIR" \
+    --config-patch "@${PATCH_FILE}" >/dev/null
+else
+  log "WARN: talosctl gen config does not support --config-patch on this host."
+  log "WARN: If installs become flaky, upgrade talosctl."
+  talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" --output-dir "$GEN_DIR" >/dev/null
+fi
+rm -f "$PATCH_FILE"
 
-  # Eject ISO (ignore errors)
-  local tgt
-  tgt="$(virsh --connect "$LIBVIRT_URI" domblklist "$vm" --details 2>/dev/null | awk '$3=="cdrom"{print $4; exit}' || true)"
-  if [[ -n "$tgt" ]]; then
-    log "Ejecting ISO from ${vm} (cdrom target ${tgt})"
-    virsh --connect "$LIBVIRT_URI" change-media "$vm" "$tgt" --eject >/dev/null 2>&1 || true
+export TALOSCONFIG="$GEN_DIR/talosconfig"
+
+# Apply configs
+while IFS= read -r row; do
+  name="$(csv_get "$row" name)"
+  role="$(csv_get "$row" role)"
+  ip="$(csv_get "$row" ip)"
+
+  log "Waiting for Talos port on ${name} ${ip}:50000"
+  wait_port "$ip" 50000 300 || die "Talos API port not reachable on ${ip}:50000"
+
+  cfg="$GEN_DIR/worker.yaml"
+  [[ "$role" == "controlplane" ]] && cfg="$GEN_DIR/controlplane.yaml"
+
+  log "Apply config -> ${name} (${ip})"
+  talosctl apply-config --insecure --nodes "$ip" --file "$cfg" >/dev/null
+
+  log "Waiting for Talos mTLS API to become ready on ${ip}"
+  if ! wait_talos_ok "$ip" 420; then
+    log "DEBUG: talosctl version:"
+    talosctl --nodes "$ip" --endpoints "$ip" version || true
+    die "Talos API did not become ready (mTLS) on ${ip} after apply-config"
   fi
+done < <(csv_rows)
 
-  # Set boot order: hd first
-  local tmp
-  tmp="$(mktemp)"
-  if ! virsh --connect "$LIBVIRT_URI" dumpxml --inactive "$vm" > "$tmp" 2>/dev/null; then
-    virsh --connect "$LIBVIRT_URI" dumpxml "$vm" > "$tmp"
+# Bootstrap with retries (API may flap briefly)
+log "Bootstrap on ${CP_IP}"
+for i in $(seq 1 120); do
+  if talosctl bootstrap --nodes "$CP_IP" --endpoints "$CP_IP" >/dev/null 2>&1; then
+    log "Bootstrap OK"
+    break
   fi
-  sed -i "/<boot dev=/d" "$tmp"
-  sed -i "0,/<os[^>]*>/s//&\n    <boot dev='hd'\/>\n    <boot dev='cdrom'\/>/" "$tmp"
-  virsh --connect "$LIBVIRT_URI" define "$tmp" >/dev/null
-  rm -f "$tmp"
-}
-
-restart_domain() {
-  local vm="$1"
-  log "Restarting ${vm} to ensure it boots from disk"
-  virsh --connect "$LIBVIRT_URI" shutdown "$vm" >/dev/null 2>&1 || true
+  out="$(talosctl bootstrap --nodes "$CP_IP" --endpoints "$CP_IP" 2>&1 || true)"
+  if echo "$out" | grep -qi "already"; then
+    log "Bootstrap already done"
+    break
+  fi
+  if (( i % 5 == 1 )); then
+    log "bootstrap retry ${i}/120 -> ${out}"
+  else
+    log "bootstrap retry ${i}/120 (waiting) - sleep 2s"
+  fi
   sleep 2
-  virsh --connect "$LIBVIRT_URI" destroy "$vm" >/dev/null 2>&1 || true
-  virsh --connect "$LIBVIRT_URI" start "$vm" >/dev/null
-}
+  [[ "$i" -lt 120 ]] || die "Bootstrap failed after retries"
+done
 
-apply_node_config() {
-  local name="$1" role="$2" mac="$3" ip="$4"
+# Write kubeconfig (Talos syntax: kubeconfig <local-path>)
+mkdir -p "$(dirname "$KUBECONFIG_OUT")"
+log "Writing kubeconfig to $KUBECONFIG_OUT"
+talosctl kubeconfig "$KUBECONFIG_OUT" --nodes "$CP_IP" --endpoints "$CP_IP" --force >/dev/null
+chmod 0600 "$KUBECONFIG_OUT" || true
 
-  local cfg stamp
-  cfg="$(make_node_config "$name" "$role" "$mac")"
-  stamp="${STATE_DIR}/applied.${name}"
+# Make kubectl work WITHOUT manual exports:
+mkdir -p /root/.kube
+cp -f "$KUBECONFIG_OUT" /root/.kube/config
+chmod 0600 /root/.kube/config || true
 
-  log "Waiting for Talos API on ${ip}:50000 before apply-config..."
-  wait_port "$ip" 50000 900 || die "Talos API not reachable on ${ip}:50000"
-
-  log "Applying config to ${name} (${ip})"
-  talosctl --talosconfig "${CFG_DIR}/talosconfig" apply-config \
-    --insecure \
-    --nodes "$ip" \
-    --endpoints "$ip" \
-    --file "$cfg"
-
-  log "Waiting for Talos API to return on ${ip}:50000 after apply-config..."
-  wait_port "$ip" 50000 1200 || die "Talos API did not come back on ${ip}:50000"
-
-  log "Waiting for TLS to become valid on ${ip} (this can take time if it's installing to disk)..."
-  if ! wait_talos_tls_ok "$ip" 900; then
-    die "TLS still failing after apply-config on ${name} (${ip}). Most likely still booting ISO/maintenance or install to disk didn't happen (check INSTALL_DISK=${INSTALL_DISK})."
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+  user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+  user_group="$(id -gn "$SUDO_USER" 2>/dev/null || true)"
+  if [[ -n "$user_home" && -d "$user_home" && -n "$user_group" ]]; then
+    mkdir -p "${user_home}/.kube"
+    cp -f "$KUBECONFIG_OUT" "${user_home}/.kube/config"
+    cp -f "$KUBECONFIG_OUT" "${user_home}/.kube/${TALOS_CLUSTER_NAME}.config"
+    chown "$SUDO_USER:$user_group" "${user_home}/.kube" "${user_home}/.kube/config" "${user_home}/.kube/${TALOS_CLUSTER_NAME}.config" || true
+    chmod 0700 "${user_home}/.kube" || true
+    chmod 0600 "${user_home}/.kube/config" "${user_home}/.kube/${TALOS_CLUSTER_NAME}.config" || true
+    log "Also wrote kubeconfig for user ${SUDO_USER}: ${user_home}/.kube/config"
+  else
+    log "WARN: could not resolve home/group for SUDO_USER='${SUDO_USER}', skipped user kubeconfig copy."
   fi
+fi
 
-  # Now we are confident the node is using our generated CA -> stop booting ISO.
-  finalize_boot_from_disk "$name"
-  restart_domain "$name"
+# ---- NEW: Wait until apiserver and node are actually ready ----
+if [[ "$HAVE_KUBECTL" -eq 1 ]]; then
+  log "Waiting for Kubernetes API (readyz) on https://${CP_IP}:6443"
+  # Port can be briefly closed; readyz is the real signal.
+  if ! wait_k8s_readyz 600; then
+    log "WARN: Kubernetes API not ready within timeout. You can check with:"
+    log "  kubectl --kubeconfig $KUBECONFIG_OUT get nodes"
+  else
+    log "Kubernetes API is ready."
 
-  # Wait for it to come back again after reboot-from-disk
-  wait_port "$ip" 50000 1200 || die "Talos API did not come back after forcing disk boot: ${ip}:50000"
-  wait_talos_tls_ok "$ip" 600 || die "TLS failed after forcing disk boot on ${name} (${ip})."
-
-  touch "$stamp"
-}
-
-bootstrap_once() {
-  local cp_ip="$1"
-  local stamp="${STATE_DIR}/bootstrapped"
-  if [[ -f "$stamp" ]]; then
-    log "Cluster already bootstrapped (stamp exists)."
-    return 0
+    log "Waiting for node '${CP_NAME}' to become Ready=True"
+    if wait_node_ready "$CP_NAME" 600; then
+      log "Node is Ready."
+    else
+      st="$(node_ready_status "$CP_NAME")"
+      log "WARN: node did not become Ready within timeout (current Ready=${st:-<unknown>})."
+      log "You can inspect:"
+      log "  kubectl get pods -A"
+      log "  kubectl describe node ${CP_NAME}"
+    fi
   fi
-  log "Bootstrapping etcd on ${cp_ip}"
-  talos_run_with_fallback bootstrap --nodes "$cp_ip" --endpoints "$cp_ip"
-  touch "$stamp"
-}
+else
+  log "WARN: kubectl not found on host. Skipping Kubernetes readiness waits."
+  log "Tip: install kubectl or run:"
+  log "  export KUBECONFIG=$KUBECONFIG_OUT"
+  log "  kubectl get nodes"
+fi
 
-write_kubeconfig() {
-  local cp_ip="$1"
-  mkdir -p /root/.kube
-  chmod 0700 /root/.kube
-
-  log "Writing kubeconfig to ${KUBECONFIG_OUT}"
-  # Your talosctl expects kubeconfig output path as POSITIONAL arg.
-  talos_run_with_fallback kubeconfig \
-    "$KUBECONFIG_OUT" \
-    --nodes "$cp_ip" \
-    --endpoints "$cp_ip" \
-    --force
-
-  [[ -s "$KUBECONFIG_OUT" ]] || die "kubeconfig was not created: ${KUBECONFIG_OUT}"
-  chmod 0600 "$KUBECONFIG_OUT"
-  ln -sf "$KUBECONFIG_OUT" /root/.kube/config || true
-}
-
-main() {
-  log "Provisioning Talos for profile '${PROFILE}'"
-  csv_init
-
-  local cp_ip
-  cp_ip="$(first_controlplane_ip || true)"
-  [[ -n "$cp_ip" ]] || die "No controlplane node found in nodes.csv"
-
-  gen_base_configs_if_missing "$cp_ip"
-
-  while IFS= read -r row; do
-    local name role ip mac
-    name="$(csv_get "$row" name)"
-    role="$(csv_get "$row" role)"
-    ip="$(csv_get "$row" ip)"
-    mac="$(csv_get "$row" mac)"
-    apply_node_config "$name" "$role" "$mac" "$ip"
-  done < <(csv_rows)
-
-  bootstrap_once "$cp_ip"
-  write_kubeconfig "$cp_ip"
-
-  log "Talos provision completed for profile '${PROFILE}'."
-}
-
-main "$@"
+log "Kubeconfig ready."
+log "Now this should work without exports:"
+log "  kubectl get nodes"
