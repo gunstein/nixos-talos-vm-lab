@@ -1,35 +1,35 @@
 # Talos Kubernetes Lab on NixOS
 
-Dette repoet setter opp en **lokal Kubernetes-lab basert på Talos Linux**, kjørt i **libvirt/KVM** på en **NixOS host**.
+This repository sets up a **local Kubernetes lab based on Talos Linux**, running on **libvirt/KVM** on a **NixOS host**.
 
-Fokus:
-- enkel og forutsigbar flyt
-- én lab aktiv om gangen (lab1, lab2, …)
-- idempotente kommandoer
-- tydelig skille mellom deploy og lab-operasjoner
+Goals:
+- simple and predictable workflow
+- only **one lab active at a time** (lab1, lab2, …)
+- idempotent commands
+- clear separation between *deployment* and *lab operations*
 
 ---
 
-## Oversikt
+## Overview
 
-**Roller:**
+### Roles
 
 - `install.sh`  
-  → deployer repoet til `/etc/nixos/talos-host`  
-  → kjører ev. `nixos-rebuild switch`  
-  → starter ikke laber
+  → deploys the repository to `/etc/nixos/talos-host`  
+  → optionally runs `nixos-rebuild switch`  
+  → **does not start any lab**
 
 - `scripts/lab`  
-  → eneste entrypoint for lab-operasjoner  
-  → kjører alltid som root  
-  → wrapper rundt `scripts/lab.sh`
+  → the **only supported entrypoint** for lab operations  
+  → always runs as root  
+  → thin wrapper around `scripts/lab.sh`
 
 - `scripts/lab.sh`  
-  → faktisk orkestrering (libvirt, Talos, Kubernetes)
+  → actual orchestration logic (libvirt, Talos, Kubernetes)
 
 ---
 
-## Katalogstruktur (relevant)
+## Repository layout (relevant)
 
 ```text
 .
@@ -55,21 +55,23 @@ Fokus:
 
 ---
 
-## 1. Førstegangs deploy (eller etter endringer i repo)
+## 1. Initial deployment (or after repo changes)
 
-Kjøres fra repo-klonen (f.eks. `~/nixos-talos-vm-lab`):
+Run this **from the repository clone**
+(e.g. `~/nixos-talos-vm-lab`):
 
 ```bash
 sudo ./scripts/install.sh
 ```
 
-Dette gjør:
-- rsync av repo → `/etc/nixos/talos-host`
-- sikrer `hardware-configuration.nix`
-- sikrer Talos ISO i deploy-treet
-- kjører `nixos-rebuild switch` (kan slås av med `NO_REBUILD=1`)
+This will:
+- rsync the repo to `/etc/nixos/talos-host`
+- ensure `hardware-configuration.nix` is present
+- ensure the Talos ISO exists in the deploy tree
+- run `nixos-rebuild switch`  
+  (can be skipped with `NO_REBUILD=1`)
 
-Etter dette jobber du kun fra:
+After this step, you should work **only** from:
 
 ```bash
 cd /etc/nixos/talos-host
@@ -77,83 +79,139 @@ cd /etc/nixos/talos-host
 
 ---
 
-## 2. Kjøre en lab (standard flyt)
+## 2. Running a lab (standard workflow)
 
-### Starte lab1
+### Start lab1
 
 ```bash
 sudo ./scripts/lab lab1 all
 ```
 
-Dette gjør i rekkefølge:
-1. setter opp libvirt-nett (idempotent)
-2. oppretter / starter VM-er
-3. provisionerer Talos
-4. bootstrapper Kubernetes
-5. skriver kubeconfig
-6. verifiserer cluster
+This performs, in order:
+1. idempotent libvirt network setup
+2. VM creation and startup
+3. Talos provisioning
+4. Kubernetes bootstrap
+5. kubeconfig generation
+6. cluster verification
 
-Når den er ferdig:
+After completion:
 
 ```bash
 kubectl get nodes
 ```
 
+should work without any extra configuration.
+
 ---
 
-## 3. Bytte mellom laber (én lab av gangen)
+## 3. Switching between labs (one lab at a time)
 
-Dette repoet er ment brukt slik:
-> Kun én lab er aktiv om gangen
+This repository is designed to run **only one lab at a time**.
 
-### Bytte fra lab1 → lab2
+### Switch from lab1 → lab2
 
 ```bash
 sudo ./scripts/lab lab1 wipe
 sudo ./scripts/lab lab2 all
 ```
 
-### Bytte fra lab2 → lab1
+### Switch from lab2 → lab1
 
 ```bash
 sudo ./scripts/lab lab2 wipe
 sudo ./scripts/lab lab1 all
 ```
 
+The `wipe` command removes:
+- virtual machines
+- VM disks
+- libvirt network for the lab
+- Talos state
+
 ---
 
-## 4. Kommandoer
+## 4. Available commands
 
 ```bash
-sudo ./scripts/lab <lab> <cmd>
+sudo ./scripts/lab <lab> <command>
 ```
 
-| Kommando | Beskrivelse |
-|--------|-------------|
-| status | Vis status |
-| up | Opprett nett + VM |
-| provision | Talos bootstrap |
-| verify | Verifiser cluster |
-| all | up → provision → verify |
-| wipe | Fjern lab |
-| net-recreate | Tving nett-recreate |
+| Command        | Description |
+|---------------|-------------|
+| `status`       | Show VM and network status |
+| `up`           | Create network and VMs only |
+| `provision`    | Talos configuration + bootstrap |
+| `verify`       | Verify Talos and Kubernetes |
+| `all`          | `up → provision → verify` |
+| `wipe`         | Remove the entire lab |
+| `net-recreate` | **Force** libvirt network recreation (destructive) |
+
+> ⚠️ `net-recreate` should only be used if the network is broken.  
+> Normal operation is fully idempotent and does **not** recreate networks automatically.
 
 ---
 
-## 5. Kubeconfig
+## 5. Kubeconfig handling
 
-Etter `lab <name> all` fungerer:
+After running `lab <name> all`:
+
+- kubeconfig is written to:
+  - `/root/.kube/talos-<lab>.config`
+  - `/home/<user>/.kube/config`
+
+This means:
 
 ```bash
 kubectl get nodes
 ```
 
-Kubeconfig skrives til:
-- `/root/.kube/talos-<lab>.config`
-- `/home/<user>/.kube/config`
+works immediately for the active lab.
+
+---
+
+## 6. Design principles
+
+- ❌ No `sudo -E`
+- ❌ No `bash "$0"` wrappers
+- ✅ Root escalation via `sudo env -i`
+- ✅ Single entrypoint (`scripts/lab`)
+- ✅ One active lab at a time
+- ✅ Idempotent network and VM handling
+
+These choices are intentional to avoid:
+- shell recursion (SHLVL explosions)
+- OOM kills
+- SSH disconnects
+- hidden or implicit side effects
+
+---
+
+## 7. Typical workflow (summary)
+
+```bash
+# deploy changes
+sudo ./scripts/install.sh
+
+# start a lab
+cd /etc/nixos/talos-host
+sudo ./scripts/lab lab1 all
+
+# verify cluster
+kubectl get nodes
+
+# switch lab
+sudo ./scripts/lab lab1 wipe
+sudo ./scripts/lab lab2 all
+```
 
 ---
 
 ## Status
 
-Stabil Talos Kubernetes-lab klar for videre testing.
+✅ Talos Linux  
+✅ Kubernetes bootstrap  
+✅ libvirt / KVM  
+✅ Stable and reproducible lab workflow  
+
+Ready for further experimentation (CNI choices, storage, workloads, etc.).
