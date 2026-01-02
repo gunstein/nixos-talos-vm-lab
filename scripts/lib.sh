@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Small shared helpers.
-# The most important rule: do NOT use sudo -E (it can import toxic env).
-
 ROOT_DIR() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
 }
@@ -24,9 +21,9 @@ need_cmd() {
 }
 
 # Safe root escalation:
-# - no sudo -E
-# - minimal environment (env -i)
-# - guard to prevent accidental infinite re-exec
+# - no sudo -E (prevents toxic env / SHLVL explosions)
+# - minimal env via env -i
+# - guard prevents recursion
 as_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     if [[ "${TALOS_HOST_SUDO_GUARD:-}" == "1" ]]; then
@@ -42,7 +39,6 @@ as_root() {
   fi
 }
 
-# Resolve a script path in a safe way
 script_path() {
   local p="$1"
   local full="${ROOT}/${p}"

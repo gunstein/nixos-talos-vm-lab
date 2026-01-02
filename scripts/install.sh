@@ -16,7 +16,6 @@ require_root() {
 
 require_root "$@"
 
-# Backwards compatibility: allow an optional argument but ignore it.
 if [[ $# -ge 1 ]]; then
   log "WARN: install.sh no longer takes a <profile>. Ignoring argument(s): $*"
 fi
@@ -48,7 +47,6 @@ mkdir -p /etc/nixos/secrets
 log "Make scripts executable"
 chmod +x "${TARGET}/scripts/"*.sh 2>/dev/null || true
 chmod +x "${TARGET}/scripts/lab" 2>/dev/null || true
-chmod +x "${TARGET}/scripts/steps/"*.sh 2>/dev/null || true
 
 log "Ensure Talos ISO is present in deploy tree"
 mkdir -p "${TARGET}/assets"

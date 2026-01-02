@@ -7,9 +7,9 @@ need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
 # Safe root escalation:
 # - no sudo -E
-# - no "bash $0" (run script directly, respect shebang)
+# - no "bash $0" (run script directly; rely on shebang)
 # - minimal env (env -i)
-# - guard against recursion
+# - guard prevents recursion
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     command -v sudo >/dev/null 2>&1 || die "Must run as root (sudo missing)."
@@ -51,7 +51,6 @@ ISO=""
 
 DISK_DIR="/var/lib/libvirt/images"
 
-# NEW: make fresh/snapshot-revert hosts idempotent
 ensure_disk_dir() { mkdir -p "${DISK_DIR}"; }
 
 load_profile() {
@@ -79,20 +78,11 @@ load_profile() {
   [[ -n "${TALOS_DHCP_END:-}" ]] || die "vars.env missing TALOS_DHCP_END"
   [[ -n "${TALOS_CLUSTER_NAME:-}" ]] || die "vars.env missing TALOS_CLUSTER_NAME"
 
-  # Default bridge name is always derived from net name unless explicitly set
   : "${TALOS_BRIDGE_NAME:=virbr-${TALOS_NET_NAME}}"
-
-  # SANITIZE: avoid legacy bridge name that collides across labs
-  if [[ "$TALOS_BRIDGE_NAME" == "virbr-talosnet" && "$TALOS_NET_NAME" != "talosnet" ]]; then
-    log "WARN: TALOS_BRIDGE_NAME=virbr-talosnet is a legacy value that causes collisions."
-    TALOS_BRIDGE_NAME="virbr-${TALOS_NET_NAME}"
-    log "WARN: Overriding bridge to: ${TALOS_BRIDGE_NAME}"
-  fi
 
   : "${TALOS_DIR:=/var/lib/${TALOS_CLUSTER_NAME}}"
   : "${KUBECONFIG_OUT:=/root/.kube/${TALOS_CLUSTER_NAME}.config}"
 
-  # ISO selection (repo deploy tree first)
   if [[ -z "${ISO:-}" ]]; then
     if [[ -f "${ROOT}/assets/metal-amd64.iso" ]]; then
       ISO="${ROOT}/assets/metal-amd64.iso"
@@ -109,7 +99,6 @@ load_profile() {
   export TALOS_DIR KUBECONFIG_OUT ISO
 }
 
-# ---- CSV helpers ----
 declare -A CSV_IDX
 
 trim_ws() {
