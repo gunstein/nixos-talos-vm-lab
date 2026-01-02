@@ -5,10 +5,24 @@ log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
+# Safe root escalation:
+# - no sudo -E
+# - no "bash $0" (run script directly, respect shebang)
+# - minimal env (env -i)
+# - guard against recursion
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     command -v sudo >/dev/null 2>&1 || die "Must run as root (sudo missing)."
-    exec sudo -E bash "$0" "$@"
+    if [[ "${TALOS_HOST_SUDO_GUARD:-}" == "1" ]]; then
+      die "Refusing to sudo again (guard hit). A wrapper/script is looping."
+    fi
+
+    exec sudo env -i \
+      TALOS_HOST_SUDO_GUARD=1 \
+      HOME=/root \
+      PATH=/run/current-system/sw/bin:/usr/bin:/bin \
+      TERM="${TERM:-xterm-256color}" \
+      "$0" "$@"
   fi
 }
 
@@ -69,7 +83,6 @@ load_profile() {
   : "${TALOS_BRIDGE_NAME:=virbr-${TALOS_NET_NAME}}"
 
   # SANITIZE: avoid legacy bridge name that collides across labs
-  # If someone accidentally uses virbr-talosnet, rewrite to virbr-${TALOS_NET_NAME}
   if [[ "$TALOS_BRIDGE_NAME" == "virbr-talosnet" && "$TALOS_NET_NAME" != "talosnet" ]]; then
     log "WARN: TALOS_BRIDGE_NAME=virbr-talosnet is a legacy value that causes collisions."
     TALOS_BRIDGE_NAME="virbr-${TALOS_NET_NAME}"
