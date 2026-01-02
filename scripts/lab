@@ -2,6 +2,13 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+# Enforce canonical deploy tree
+if [[ "$ROOT" != "/etc/nixos/talos-host" ]]; then
+  echo "ERROR: Run from /etc/nixos/talos-host (canonical deploy tree)." >&2
+  echo "  cd /etc/nixos/talos-host" >&2
+  exit 1
+fi
+
 usage() {
   cat <<EOF
 Usage:

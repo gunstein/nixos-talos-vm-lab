@@ -3,9 +3,9 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 # Usage:
-#   sudo ./scripts/verify.sh lab2
+#   sudo ./scripts/talos-verify.sh lab2
 # or (after install.sh)
-#   sudo /etc/nixos/talos-host/scripts/verify.sh lab2
+#   sudo /etc/nixos/talos-host/scripts/talos-verify.sh lab2
 
 require_root "$@"
 

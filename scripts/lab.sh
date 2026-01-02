@@ -272,13 +272,7 @@ cmd_provision() {
 
 cmd_verify() {
   log "== VERIFY =="
-  if [[ -f "${ROOT}/scripts/verify.sh" ]]; then
-    "${ROOT}/scripts/verify.sh" "$PROFILE"
-  elif [[ -f "${ROOT}/scripts/talos-verify.sh" ]]; then
-    "${ROOT}/scripts/talos-verify.sh" "$PROFILE"
-  else
-    die "Missing verify script"
-  fi
+  "${ROOT}/scripts/talos-verify.sh" "$PROFILE"
 }
 
 cmd_all() {
