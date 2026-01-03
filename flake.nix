@@ -5,12 +5,26 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
   };
 
-  outputs = { self, nixpkgs }: {
-    nixosConfigurations.nixos-host = nixpkgs.lib.nixosSystem {
+  outputs = { self, nixpkgs }:
+    let
       system = "x86_64-linux";
-      modules = [
-        ./hosts/nixos-host.nix
-      ];
+      pkgs = import nixpkgs { inherit system; };
+    in
+    {
+      nixosConfigurations.nixos-host = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./hosts/nixos-host.nix
+        ];
+      };
+
+      devShells.${system}.default = pkgs.mkShell {
+        packages = with pkgs; [
+          bashInteractive
+          git
+          shellcheck
+          shfmt
+        ];
+      };
     };
-  };
 }

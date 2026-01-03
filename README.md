@@ -267,3 +267,93 @@ Then from any machine on your LAN:
 
 > Tip: To find the NixOS-host VM IP from Ubuntu, try:
 > `sudo virsh domifaddr <vm-name>`
+
+## Developer tools: doctor, lint and fmt
+
+This repo includes a few small helper commands that make it easier to debug issues and keep the bash code consistent.
+
+### Devshell (recommended)
+
+If you have Nix with flakes enabled, you can get the right tool versions (shellcheck/shfmt) without installing anything globally:
+
+```bash
+nix develop
+```
+
+To run a single command without entering an interactive shell:
+
+```bash
+nix develop -c <command>
+```
+
+Example:
+
+```bash
+nix develop -c ./scripts/lint
+```
+
+### `./scripts/doctor` — read-only health checks
+
+`doctor` checks that your host/profile has what it needs for the lab to work (tools, `/dev/kvm`, libvirt access, the Talos ISO, and basic profile validation). It does not make destructive changes.
+
+Run a general check:
+
+```bash
+./scripts/doctor
+```
+
+Validate a specific profile:
+
+```bash
+./scripts/doctor lab1
+./scripts/doctor lab2
+```
+
+If the cluster is not up yet (or you want to skip k8s checks):
+
+```bash
+./scripts/doctor lab1 --no-k8s
+```
+
+**Typical workflow:**  
+Run `doctor` before starting a new lab, and when something fails: “Run doctor and paste the output”.
+
+### `./scripts/lint` — static bash checks (ShellCheck)
+
+Runs ShellCheck on the scripts and catches common bash issues early.
+
+```bash
+./scripts/lint
+```
+
+Recommended via devshell (ensures consistent results for everyone):
+
+```bash
+nix develop -c ./scripts/lint
+```
+
+### `./scripts/fmt` — format bash scripts (shfmt)
+
+Formats bash scripts with a consistent style (makes the code easier to read, teach, and maintain).
+
+```bash
+./scripts/fmt
+```
+
+Via devshell:
+
+```bash
+nix develop -c ./scripts/fmt
+```
+
+**Suggested pre-commit routine:**
+
+```bash
+./scripts/fmt
+./scripts/lint
+```
+
+### Tips for contributors/maintenance
+
+- If you change scripts: run `fmt` + `lint` before you commit.
+- If a lab fails: run `doctor` first — it often reveals environment/network issues quickly.
