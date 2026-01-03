@@ -20,7 +20,7 @@ need qemu-img
 
 PROFILE="${1:-}"
 CMD="${2:-}"
-[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh <profile> <cmd> (status|up|provision|verify|all|wipe|net-recreate)"
+[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh <profile> <cmd> (status|up|provision|verify|all|wipe|net-recreate|demo-frontend)"
 
 load_profile "$PROFILE"
 csv_init
@@ -275,6 +275,47 @@ cmd_verify() {
   "${ROOT}/scripts/talos-verify.sh" "$PROFILE"
 }
 
+
+cmd_demo_frontend() {
+  log "== DEMO FRONTEND =="
+  need kubectl
+  need systemctl
+
+  [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
+
+  local cp cp_name cp_ip
+  cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
+  cp_name="$(echo "$cp" | awk '{print $1}')"
+  cp_ip="$(echo "$cp" | awk '{print $2}')"
+
+  local manifests="$ROOT/k8s/apps/frontend-demo"
+  [[ -d "$manifests" ]] || die "Missing manifests dir: $manifests"
+
+  log "Apply demo frontend manifests: $manifests"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$manifests" >/dev/null
+
+  log "Wait for deployment rollout"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m
+
+  log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
+  cat > /etc/talos-frontend-proxy.env <<EOF
+LISTEN_PORT=8080
+TARGET_IP=${cp_ip}
+TARGET_PORT=30080
+EOF
+
+  systemctl restart talos-frontend-proxy.service
+
+  log "OK. Test from inside this VM:"
+  log "  curl -sS http://127.0.0.1:8080/"
+  log "Or directly inside the Talos lab network:"
+  log "  curl -sS http://${cp_ip}:30080/"
+
+  log "To make it reachable from your LAN (outside the Ubuntu host):"
+  log "  set up a small forwarder on Ubuntu: extras/ubuntu/install-frontend-forward.sh"
+}
+
+
 cmd_all() {
   cmd_up
   cmd_provision
@@ -289,5 +330,6 @@ case "$CMD" in
   provision) cmd_provision ;;
   verify) cmd_verify ;;
   all) cmd_all ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate)" ;;
+  demo-frontend) cmd_demo_frontend ;;
+  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo-frontend)" ;;
 esac

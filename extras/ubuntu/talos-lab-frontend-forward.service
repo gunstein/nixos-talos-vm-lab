@@ -1,0 +1,13 @@
+[Unit]
+Description=Talos lab: forward Ubuntu :8080 to NixOS-host VM :8080
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/talos-lab-frontend-forward.env
+ExecStart=/usr/bin/socat TCP-LISTEN:${LISTEN_PORT},fork,reuseaddr TCP:${TARGET_IP}:${TARGET_PORT}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

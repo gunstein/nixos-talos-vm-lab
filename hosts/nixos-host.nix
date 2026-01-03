@@ -23,7 +23,7 @@ let
     fi
 
     # Show routes for debugging (helpful when you ssh back in)
-    ${pkgs.iproute2}/bin/ip route | sed -n '1,80p' || true
+    ${pkgs.iproute2}/bin/ip route | sed -n '1,120p' || true
   '';
 in
 {
@@ -52,7 +52,7 @@ in
 
   environment.systemPackages = with pkgs; [
     bash coreutils gnugrep gawk util-linux
-    iproute2 iputils netcat-openbsd
+    iproute2 iputils netcat-openbsd socat
     git vim tmux
 
     # Virtualization
@@ -66,9 +66,6 @@ in
   virtualisation.libvirtd.onBoot = "start";
   virtualisation.libvirtd.onShutdown = "shutdown";
 
-  # IMPORTANT for nested libvirt:
-  # libvirt's default network often uses 192.168.122.0/24, which can conflict with
-  # the host VM's management network (also commonly 192.168.122.0/24).
   systemd.services.libvirt-disable-default-network = {
     description = "Disable libvirt default network (avoid nested 192.168.122.0/24 route conflicts)";
     after = [ "libvirtd.service" "virtqemud.service" "virtnetworkd.service" "network-online.target" ];
@@ -79,6 +76,35 @@ in
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = disableLibvirtDefaultNet;
+    };
+  };
+
+  # If firewall is enabled, allow Ubuntu host to reach the forwarding port inside this VM
+  networking.firewall.allowedTCPPorts = [ 8080 ];
+
+  # Forward :8080 on this VM -> NodePort inside Talos lab (configured by demo-frontend step)
+  systemd.services.talos-frontend-proxy = let
+    proxyScript = pkgs.writeShellScript "talos-frontend-proxy" ''
+      set -euo pipefail
+      source /etc/talos-frontend-proxy.env
+      exec ${pkgs.socat}/bin/socat \
+        "TCP-LISTEN:$LISTEN_PORT,fork,reuseaddr" \
+        "TCP:$TARGET_IP:$TARGET_PORT"
+    '';
+  in {
+    description = "Talos lab: forward NixOS-host :8080 to current lab frontend NodePort";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    unitConfig = {
+      ConditionPathExists = "/etc/talos-frontend-proxy.env";
+    };
+
+    serviceConfig = {
+      ExecStart = proxyScript;
+      Restart = "always";
+      RestartSec = 2;
     };
   };
 

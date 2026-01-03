@@ -215,3 +215,55 @@ sudo ./scripts/lab lab2 all
 ✅ Stable and reproducible lab workflow  
 
 Ready for further experimentation (CNI choices, storage, workloads, etc.).
+
+---
+
+## 8. Demo frontend (reachable from your LAN)
+
+This repo includes a **super simple** frontend demo:
+- static `nginx` pod
+- `NodePort` service (fixed port `30080`)
+- an optional helper forwarder on the NixOS-host VM (`:8080`)
+- an optional Ubuntu-side forwarder so the demo is reachable from machines **outside the Ubuntu host**
+
+### Step A: start the lab
+
+```bash
+sudo ./scripts/install.sh
+cd /etc/nixos/talos-host
+sudo ./scripts/lab lab1 all
+```
+
+### Step B: deploy + expose the demo frontend inside the NixOS-host VM
+
+```bash
+sudo ./scripts/lab lab1 demo-frontend
+```
+
+This will:
+- `kubectl apply -f k8s/apps/frontend-demo`
+- create `/etc/talos-frontend-proxy.env`
+- restart the NixOS-host systemd service `talos-frontend-proxy`
+
+You can verify inside the NixOS-host VM:
+
+```bash
+curl -sS http://127.0.0.1:8080/
+```
+
+### Step C: expose it to your LAN via Ubuntu
+
+From Ubuntu (host), set up the small forwarder provided in `extras/ubuntu/`:
+
+```bash
+# in this repo on Ubuntu
+cd extras/ubuntu
+sudo ./install-frontend-forward.sh <NIXOS_HOST_VM_IP>
+```
+
+Then from any machine on your LAN:
+
+- `http://<ubuntu-lan-ip>:8080/`
+
+> Tip: To find the NixOS-host VM IP from Ubuntu, try:
+> `sudo virsh domifaddr <vm-name>`
