@@ -1,28 +1,36 @@
 #!/run/current-system/sw/bin/bash
 set -euo pipefail
+
+# Talos cluster provisioning:
+# - Generate Talos configs (controlplane + worker + talosconfig)
+# - Apply configs
+# - Bootstrap Kubernetes
+# - Write kubeconfig (root + sudo user)
+# - Install metrics-server from a vendored manifest (delete+apply overwrite)
+
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 require_root "$@"
+
 need talosctl
-need mkdir
-need awk
 need nc
-need sleep
-need rm
+need awk
+need sed
 need grep
 need mktemp
+need mkdir
+need rm
 need cp
 need chmod
 need chown
 need getent
 need cut
 need id
+need sleep
 
-# kubectl is optional but recommended; if missing we will warn and skip k8s readiness waits.
+HAVE_KUBECTL=0
 if command -v kubectl >/dev/null 2>&1; then
   HAVE_KUBECTL=1
-else
-  HAVE_KUBECTL=0
 fi
 
 load_profile "${1:-}"
@@ -31,7 +39,10 @@ csv_init
 GEN_DIR="${TALOS_DIR}/generated"
 mkdir -p "$GEN_DIR"
 
-# Find first controlplane node (name + ip)
+# Repo root (assumes scripts/ is one level below repo root)
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ---- find first controlplane node (name + ip) ----
 CP_IP=""
 CP_NAME=""
 while IFS= read -r row; do
@@ -42,15 +53,16 @@ while IFS= read -r row; do
     break
   fi
 done < <(csv_rows)
+
 [[ -n "$CP_IP" && -n "$CP_NAME" ]] || die "No controlplane node found in nodes.csv (role=controlplane)"
 
+# ---- talos helpers ----
 talos_ok() {
-  # Only true when Talos API is usable with our TALOSCONFIG (mTLS), not just port open
   talosctl --nodes "$1" --endpoints "$1" version >/dev/null 2>&1
 }
 
 wait_talos_ok() {
-  local ip="$1" timeout_s="${2:-300}"
+  local ip="$1" timeout_s="${2:-420}"
   local start now
   start="$(date +%s)"
   while true; do
@@ -70,8 +82,8 @@ supports_flag() {
   $subcmd --help 2>/dev/null | grep -q -- "$flag"
 }
 
+# ---- kubernetes helpers ----
 k8s_readyz_ok() {
-  # returns 0 when apiserver returns "ok" on /readyz
   kubectl --kubeconfig "$KUBECONFIG_OUT" get --raw='/readyz' >/dev/null 2>&1
 }
 
@@ -92,8 +104,8 @@ wait_k8s_readyz() {
 }
 
 node_ready_status() {
-  # prints True/False/Unknown/empty
-  kubectl --kubeconfig "$KUBECONFIG_OUT" get node "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
+  kubectl --kubeconfig "$KUBECONFIG_OUT" get node "$1" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
 }
 
 wait_node_ready() {
@@ -113,7 +125,57 @@ wait_node_ready() {
   done
 }
 
-# Patch to ensure install to disk in VM labs (metal installer ISO)
+# ---- metrics-server addon (overwrite strategy) ----
+metrics_manifest_path() {
+  echo "${REPO_ROOT}/k8s/addons/metrics-server.yaml"
+}
+
+metrics_diagnostics_short() {
+  local kc="$KUBECONFIG_OUT"
+  log "metrics-server status (short):"
+  kubectl --kubeconfig "$kc" -n kube-system get pods -l k8s-app=metrics-server -o wide || true
+
+  local pod
+  pod="$(kubectl --kubeconfig "$kc" -n kube-system get pods -l k8s-app=metrics-server \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+  if [[ -n "$pod" ]]; then
+    log "metrics-server Events (describe pod/$pod, Events section only):"
+    kubectl --kubeconfig "$kc" -n kube-system describe pod "$pod" 2>/dev/null \
+      | awk 'BEGIN{p=0} /^Events:/{p=1} {if(p)print}' || true
+  fi
+
+  log "metrics-server logs (tail):"
+  kubectl --kubeconfig "$kc" -n kube-system logs deploy/metrics-server --tail=120 || true
+}
+
+install_metrics_server_overwrite() {
+  local kc="$KUBECONFIG_OUT"
+  local manifest
+  manifest="$(metrics_manifest_path)"
+
+  [[ -f "$manifest" ]] || die "Missing metrics-server manifest: $manifest"
+
+  log "Installing metrics-server (overwrite) from $manifest"
+  kubectl --kubeconfig "$kc" delete -f "$manifest" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$kc" apply -f "$manifest" >/dev/null
+
+  if ! kubectl --kubeconfig "$kc" -n kube-system rollout status deploy/metrics-server --timeout=240s; then
+    log "ERROR: metrics-server rollout failed"
+    metrics_diagnostics_short
+    return 1
+  fi
+
+  if ! kubectl --kubeconfig "$kc" wait --for=condition=Available --timeout=180s apiservice/v1beta1.metrics.k8s.io >/dev/null 2>&1; then
+    log "ERROR: Metrics APIService not Available"
+    metrics_diagnostics_short
+    return 1
+  fi
+
+  log "metrics-server installed; Metrics API is Available"
+}
+
+# ---- generate talos configs ----
 PATCH_FILE="$(mktemp)"
 cat > "$PATCH_FILE" <<'EOF'
 machine:
@@ -129,15 +191,14 @@ if supports_flag "talosctl gen config" "--config-patch"; then
     --output-dir "$GEN_DIR" \
     --config-patch "@${PATCH_FILE}" >/dev/null
 else
-  log "WARN: talosctl gen config does not support --config-patch on this host."
-  log "WARN: If installs become flaky, upgrade talosctl."
+  log "WARN: talosctl gen config does not support --config-patch."
   talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" --output-dir "$GEN_DIR" >/dev/null
 fi
 rm -f "$PATCH_FILE"
 
 export TALOSCONFIG="$GEN_DIR/talosconfig"
 
-# Apply configs
+# ---- apply configs ----
 while IFS= read -r row; do
   name="$(csv_get "$row" name)"
   role="$(csv_get "$row" role)"
@@ -153,14 +214,10 @@ while IFS= read -r row; do
   talosctl apply-config --insecure --nodes "$ip" --file "$cfg" >/dev/null
 
   log "Waiting for Talos mTLS API to become ready on ${ip}"
-  if ! wait_talos_ok "$ip" 420; then
-    log "DEBUG: talosctl version:"
-    talosctl --nodes "$ip" --endpoints "$ip" version || true
-    die "Talos API did not become ready (mTLS) on ${ip} after apply-config"
-  fi
+  wait_talos_ok "$ip" 420 || die "Talos API did not become ready (mTLS) on ${ip} after apply-config"
 done < <(csv_rows)
 
-# Bootstrap with retries (API may flap briefly)
+# ---- bootstrap ----
 log "Bootstrap on ${CP_IP}"
 for i in $(seq 1 120); do
   if talosctl bootstrap --nodes "$CP_IP" --endpoints "$CP_IP" >/dev/null 2>&1; then
@@ -172,22 +229,16 @@ for i in $(seq 1 120); do
     log "Bootstrap already done"
     break
   fi
-  if (( i % 5 == 1 )); then
-    log "bootstrap retry ${i}/120 -> ${out}"
-  else
-    log "bootstrap retry ${i}/120 (waiting) - sleep 2s"
-  fi
   sleep 2
   [[ "$i" -lt 120 ]] || die "Bootstrap failed after retries"
 done
 
-# Write kubeconfig (Talos syntax: kubeconfig <local-path>)
+# ---- kubeconfig ----
 mkdir -p "$(dirname "$KUBECONFIG_OUT")"
 log "Writing kubeconfig to $KUBECONFIG_OUT"
 talosctl kubeconfig "$KUBECONFIG_OUT" --nodes "$CP_IP" --endpoints "$CP_IP" --force >/dev/null
 chmod 0600 "$KUBECONFIG_OUT" || true
 
-# Make kubectl work WITHOUT manual exports:
 mkdir -p /root/.kube
 cp -f "$KUBECONFIG_OUT" /root/.kube/config
 chmod 0600 /root/.kube/config || true
@@ -203,39 +254,29 @@ if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
     chmod 0700 "${user_home}/.kube" || true
     chmod 0600 "${user_home}/.kube/config" "${user_home}/.kube/${TALOS_CLUSTER_NAME}.config" || true
     log "Also wrote kubeconfig for user ${SUDO_USER}: ${user_home}/.kube/config"
-  else
-    log "WARN: could not resolve home/group for SUDO_USER='${SUDO_USER}', skipped user kubeconfig copy."
   fi
 fi
 
-# ---- NEW: Wait until apiserver and node are actually ready ----
+# ---- wait + addons ----
 if [[ "$HAVE_KUBECTL" -eq 1 ]]; then
   log "Waiting for Kubernetes API (readyz) on https://${CP_IP}:6443"
-  # Port can be briefly closed; readyz is the real signal.
-  if ! wait_k8s_readyz 600; then
-    log "WARN: Kubernetes API not ready within timeout. You can check with:"
-    log "  kubectl --kubeconfig $KUBECONFIG_OUT get nodes"
-  else
-    log "Kubernetes API is ready."
+  wait_k8s_readyz 600 || die "Kubernetes API not ready within timeout"
 
-    log "Waiting for node '${CP_NAME}' to become Ready=True"
-    if wait_node_ready "$CP_NAME" 600; then
-      log "Node is Ready."
-    else
-      st="$(node_ready_status "$CP_NAME")"
-      log "WARN: node did not become Ready within timeout (current Ready=${st:-<unknown>})."
-      log "You can inspect:"
-      log "  kubectl get pods -A"
-      log "  kubectl describe node ${CP_NAME}"
-    fi
+  log "Kubernetes API is ready."
+  log "Waiting for node '${CP_NAME}' to become Ready=True"
+  wait_node_ready "$CP_NAME" 600 || die "Node ${CP_NAME} did not become Ready within timeout"
+
+  log "Node is Ready."
+
+  if [[ "${METRICS_SERVER_ENABLE}" == "1" ]]; then
+    install_metrics_server_overwrite || true
+  else
+    log "Skipping metrics-server install (METRICS_SERVER_ENABLE=0)"
   fi
 else
-  log "WARN: kubectl not found on host. Skipping Kubernetes readiness waits."
-  log "Tip: install kubectl or run:"
-  log "  export KUBECONFIG=$KUBECONFIG_OUT"
-  log "  kubectl get nodes"
+  log "WARN: kubectl not found on host. Skipping addons."
 fi
 
-log "Kubeconfig ready."
-log "Now this should work without exports:"
-log "  kubectl get nodes"
+log "Done. Try:"
+log "  kubectl top nodes"
+log "  kubectl top pods -A"

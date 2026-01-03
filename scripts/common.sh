@@ -49,6 +49,13 @@ TALOS_DIR=""
 KUBECONFIG_OUT=""
 ISO=""
 
+# --- Add-ons (lab defaults) ---
+# Metrics Server enables `kubectl top nodes/pods`.
+METRICS_SERVER_ENABLE=""
+METRICS_SERVER_IMAGE=""
+METRICS_SERVER_KUBELET_INSECURE_TLS=""
+METRICS_SERVER_PREFERRED_ADDRESS_TYPES=""
+
 DISK_DIR="/var/lib/libvirt/images"
 
 ensure_disk_dir() { mkdir -p "${DISK_DIR}"; }
@@ -83,6 +90,13 @@ load_profile() {
   : "${TALOS_DIR:=/var/lib/${TALOS_CLUSTER_NAME}}"
   : "${KUBECONFIG_OUT:=/root/.kube/${TALOS_CLUSTER_NAME}.config}"
 
+  # --- Add-ons defaults (can be overridden in profiles/<lab>/vars.env) ---
+  : "${METRICS_SERVER_ENABLE:=1}"
+  : "${METRICS_SERVER_IMAGE:=registry.k8s.io/metrics-server/metrics-server:v0.8.0}"
+  # Typical for Talos VM labs (kubelet serving certs not trusted by default).
+  : "${METRICS_SERVER_KUBELET_INSECURE_TLS:=1}"
+  : "${METRICS_SERVER_PREFERRED_ADDRESS_TYPES:=InternalIP,ExternalIP,Hostname}"
+
   if [[ -z "${ISO:-}" ]]; then
     if [[ -f "${ROOT}/assets/metal-amd64.iso" ]]; then
       ISO="${ROOT}/assets/metal-amd64.iso"
@@ -97,6 +111,7 @@ load_profile() {
   export LIBVIRT_URI DISK_DIR
   export TALOS_NET_NAME TALOS_BRIDGE_NAME TALOS_GATEWAY TALOS_DHCP_START TALOS_DHCP_END TALOS_CLUSTER_NAME
   export TALOS_DIR KUBECONFIG_OUT ISO
+  export METRICS_SERVER_ENABLE METRICS_SERVER_IMAGE METRICS_SERVER_KUBELET_INSECURE_TLS METRICS_SERVER_PREFERRED_ADDRESS_TYPES
 }
 
 declare -A CSV_IDX
