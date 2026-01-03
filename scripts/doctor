@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=./common.sh
+source "$ROOT_DIR/scripts/common.sh"
+
+usage() {
+  cat <<EOF
+Usage:
+  scripts/doctor [lab1|lab2|...] [--no-k8s]
+
+Checks host prerequisites and (optionally) validates a lab profile.
+EOF
+}
+
+PROFILE=""
+CHECK_K8S=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --no-k8s) CHECK_K8S=0; shift ;;
+    lab*) PROFILE="$1"; shift ;;
+    *) die "Unknown arg: $1" ;;
+  esac
+done
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+ok()  { echo "✅ $*"; }
+warn(){ echo "⚠️  $*" >&2; }
+fail(){ die "$*"; }
+
+check_kvm() {
+  if [[ ! -e /dev/kvm ]]; then
+    fail "/dev/kvm not found (KVM not available). Check BIOS SVM/AMD-V and host configuration."
+  fi
+  ok "/dev/kvm present"
+}
+
+check_libvirt() {
+  need_cmd virsh
+
+  # This URI works in your NixOS-host VM setup
+  if ! virsh -c qemu:///system list --all >/dev/null 2>&1; then
+    warn "virsh cannot talk to qemu:///system. Is libvirtd/virtqemud running? Are you in libvirtd group?"
+    warn "Try: sudo systemctl status libvirtd virtqemud virtnetworkd --no-pager"
+    fail "libvirt not reachable"
+  fi
+  ok "libvirt reachable (qemu:///system)"
+
+  # Helpful: detect common route conflict
+  if ip route | grep -qE '^192\.168\.122\.0/24'; then
+    warn "Route 192.168.122.0/24 exists (often libvirt 'default' network)."
+    warn "In nested setups this can conflict with other libvirt networks."
+    warn "If you see weird routing, consider disabling the default network."
+  else
+    ok "no obvious 192.168.122.0/24 route conflict"
+  fi
+}
+
+check_tools() {
+  need_cmd awk
+  need_cmd sed
+  need_cmd ip
+  need_cmd socat
+  need_cmd talosctl
+  need_cmd kubectl
+  need_cmd virsh
+  ok "basic tools present"
+}
+
+check_iso() {
+  local iso="$ROOT_DIR/assets/metal-amd64.iso"
+  if [[ ! -f "$iso" ]]; then
+    warn "Talos ISO not found at: $iso"
+    warn "Place it there or adjust your scripts to the actual location."
+    fail "missing Talos ISO"
+  fi
+  ok "Talos ISO present: $iso"
+}
+
+validate_profile() {
+  local pdir="$ROOT_DIR/profiles/$PROFILE"
+  [[ -d "$pdir" ]] || fail "Profile dir not found: $pdir"
+
+  [[ -f "$pdir/vars.env" ]] || fail "Missing: $pdir/vars.env"
+  [[ -f "$pdir/nodes.csv" ]] || fail "Missing: $pdir/nodes.csv"
+  ok "profile files exist: $PROFILE"
+
+  # basic csv sanity: name,role,ip,mac at least (ignore comments/blank)
+  local bad
+  bad="$(awk -F',' '
+    /^[[:space:]]*#/ {next}
+    /^[[:space:]]*$/ {next}
+    NF < 4 {print NR ":" $0}
+  ' "$pdir/nodes.csv")" || true
+  [[ -z "$bad" ]] || fail "nodes.csv has malformed lines:\n$bad"
+
+  # uniqueness checks
+  local dups
+  dups="$(awk -F',' '
+    /^[[:space:]]*#/ {next}
+    /^[[:space:]]*$/ {next}
+    {gsub(/[[:space:]]+/, "", $0)}
+    {name[$1]++; role[$2]++; ip[$3]++; mac[$4]++}
+    END {
+      for (k in name) if (name[k] > 1) print "dup name: " k
+      for (k in ip)   if (ip[k] > 1)   print "dup ip: " k
+      for (k in mac)  if (mac[k] > 1)  print "dup mac: " k
+    }
+  ' "$pdir/nodes.csv")" || true
+  [[ -z "$dups" ]] || fail "nodes.csv duplicates found:\n$dups"
+  ok "nodes.csv looks sane (format + uniqueness)"
+}
+
+check_k8s_access() {
+  [[ "$CHECK_K8S" -eq 1 ]] || { ok "skipping k8s checks (--no-k8s)"; return; }
+  if kubectl get nodes >/dev/null 2>&1; then
+    ok "kubectl can reach cluster"
+  else
+    warn "kubectl cannot reach cluster (this is OK before bootstrap)."
+  fi
+}
+
+log "== DOCTOR =="
+check_tools
+check_kvm
+check_libvirt
+check_iso
+if [[ -n "$PROFILE" ]]; then
+  validate_profile
+fi
+check_k8s_access
+ok "doctor completed"
