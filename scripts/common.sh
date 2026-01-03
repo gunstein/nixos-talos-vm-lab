@@ -1,5 +1,29 @@
 #!/run/current-system/sw/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+shopt -s inherit_errexit 2>/dev/null || true
+set -o errtrace
+
+# Pretty error reporting (file:line + command)
+_on_err() {
+  local exit_code="$?"
+  local line_no="${BASH_LINENO[0]:-unknown}"
+  local src="${BASH_SOURCE[1]:-${BASH_SOURCE[0]:-unknown}}"
+  local func="${FUNCNAME[1]:-main}"
+  local cmd="${BASH_COMMAND:-unknown}"
+
+  echo >&2
+  echo >&2 "[ERROR] exit=${exit_code} at ${src}:${line_no} in ${func}()"
+  echo >&2 "        command: ${cmd}"
+  echo >&2
+  return "$exit_code"
+}
+
+# Avoid double-trapping if common.sh is sourced multiple times
+if [[ -z "${__COMMON_ERR_TRAP_INSTALLED:-}" ]]; then
+  trap _on_err ERR
+  __COMMON_ERR_TRAP_INSTALLED=1
+fi
+
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
