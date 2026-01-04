@@ -9,10 +9,62 @@ data:
     <html>
       <head>
         <meta charset="utf-8"/>
-        <title>Talos lab demo</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Talos demo</title>
+        <style>
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+          code { background: #f4f4f4; padding: 0.2rem 0.35rem; border-radius: 6px; }
+          pre { background: #f4f4f4; padding: 1rem; border-radius: 10px; overflow: auto; }
+          .ok { color: #0a7; font-weight: 600; }
+          .bad { color: #c00; font-weight: 600; }
+        </style>
       </head>
       <body>
-        <h1>✅ Talos/Kubernetes demo-frontend</h1>
-        <p>Hvis du ser denne siden via Ubuntu:8080, er port-forward-kjeden OK.</p>
+        <h1>✅ Talos/Kubernetes demo stack</h1>
+        <p>
+          If you can see this page via <code>http://&lt;ubuntu-ip&gt;:8080/</code>,
+          the forwarding chain works.
+        </p>
+
+        <h2>Backend check</h2>
+        <p>
+          This frontend calls <code>/api/hello</code> (proxied by nginx inside the cluster).
+        </p>
+
+        <button id="btn">Call /api/hello</button>
+        <p id="status" class="">(not called yet)</p>
+        <pre id="out"></pre>
+
+        <script>
+          async function callApi() {
+            const status = document.getElementById("status");
+            const out = document.getElementById("out");
+            status.textContent = "Calling /api/hello ...";
+            status.className = "";
+            out.textContent = "";
+
+            try {
+              const res = await fetch("/api/hello", { cache: "no-store" });
+              const txt = await res.text();
+              if (!res.ok) {
+                status.textContent = "Backend call failed (" + res.status + ")";
+                status.className = "bad";
+                out.textContent = txt;
+                return;
+              }
+              status.textContent = "Backend call OK";
+              status.className = "ok";
+              out.textContent = txt;
+            } catch (e) {
+              status.textContent = "Backend call failed (network error)";
+              status.className = "bad";
+              out.textContent = String(e);
+            }
+          }
+
+          document.getElementById("btn").addEventListener("click", callApi);
+          // auto-call once
+          callApi();
+        </script>
       </body>
     </html>

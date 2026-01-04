@@ -294,7 +294,8 @@ cmd_demo_frontend() {
   log "Apply demo frontend manifests: $manifests"
   kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$manifests" >/dev/null
 
-  log "Wait for deployment rollout"
+  log "Wait for deployment rollouts"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-backend --timeout=5m
   kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m
 
   log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
