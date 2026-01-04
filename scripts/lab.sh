@@ -309,6 +309,7 @@ EOF
 
   log "OK. Test from inside this VM:"
   log "  curl -sS http://127.0.0.1:8080/"
+  log "  curl -sS http://127.0.0.1:8080/api/hello"
   log "Or directly inside the Talos lab network:"
   log "  curl -sS http://${cp_ip}:30080/"
 
