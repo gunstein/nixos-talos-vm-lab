@@ -1,6 +1,9 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
+# Canonical deploy tree - all lab commands run from here
+ROOT := /etc/nixos/talos-host
+
 # Select which lab profile to operate on (lab1, lab2, ...)
 LAB ?= lab1
 
@@ -16,7 +19,7 @@ DEV := $(NIX) develop -c
         k8s-nodes k8s-pods
 
 help:
-	@echo "Targets (set LAB=lab1|lab2 as needed):"
+	@echo "Targets (LAB defaults to lab1, override with LAB=lab2):"
 	@echo ""
 	@echo "  make doctor            - host/profile health checks (read-only)"
 	@echo "  make doctor-nok8s       - doctor, skip kubernetes checks"
@@ -32,10 +35,16 @@ help:
 	@echo "  make lab-verify        - (calls: ./scripts/lab $(LAB) verify)"
 	@echo ""
 	@echo "  make demo              - build, deploy and expose the demo (./scripts/lab $(LAB) demo)"
+	@echo "  make demo-db           - demo with CloudNativePG database (./scripts/lab $(LAB) demo-db)"
 	@echo ""
 	@echo "Convenience kubectl (requires kubeconfig already present):"
 	@echo "  make k8s-nodes         - kubectl get nodes"
 	@echo "  make k8s-pods          - kubectl get pods -A"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make lab-all                 # uses lab1 (default)"
+	@echo "  make lab-all LAB=lab2        # uses lab2"
+	@echo "  make demo-db LAB=lab2        # demo with database on lab2"
 
 doctor:
 	./scripts/doctor $(LAB)
@@ -56,19 +65,22 @@ lint-nix:
 	$(DEV) ./scripts/lint
 
 lab-all:
-	$(SUDO) ./scripts/lab $(LAB) all
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) all
 
 lab-wipe:
-	$(SUDO) ./scripts/lab $(LAB) wipe
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) wipe
 
 lab-provision:
-	$(SUDO) ./scripts/lab $(LAB) provision
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) provision
 
 lab-verify:
-	$(SUDO) ./scripts/lab $(LAB) verify
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) verify
 
 demo:
-	$(SUDO) ./scripts/lab $(LAB) demo
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) demo
+
+demo-db:
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) demo-db
 
 # Aliases (keep your existing naming in scripts; make just provides shortcuts)
 demo-only: demo

@@ -389,7 +389,54 @@ The demo manifests deploy:
 ### Notes
 
 - The manifests are compatible with PodSecurity `restricted` (run as non-root, drop capabilities, no privilege escalation, `RuntimeDefault` seccomp).
-- Database integration (e.g. CloudNativePG) can be added next once the stateless demo stack is stable.
+
+
+## 9. Demo with database (CloudNativePG)
+
+You can also deploy the demo stack with a PostgreSQL database using CloudNativePG.
+
+### Deploy with database
+
+```bash
+sudo ./scripts/lab lab1 demo-db
+```
+
+This will:
+- Install `local-path-provisioner` for storage (vendored in `k8s/addons/`)
+- Install the CloudNativePG operator (vendored in `k8s/addons/`)
+- Create a PostgreSQL cluster (`demo-db`) in the `demo` namespace
+- Deploy the backend with `DATABASE_URL` environment variable
+- The backend connects to the database and enables `/api/items` endpoints
+
+### Test the database endpoints
+
+```bash
+# List items (empty at first)
+curl http://127.0.0.1:8080/api/items
+
+# Create an item
+curl -X POST http://127.0.0.1:8080/api/items \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my first item"}'
+
+# List items again
+curl http://127.0.0.1:8080/api/items
+```
+
+### Connect to the database directly
+
+```bash
+kubectl -n demo exec -it demo-db-1 -- psql -U demo -d demo
+```
+
+### Difference between `demo` and `demo-db`
+
+| Command | Database | `/api/items` |
+|---------|----------|--------------|
+| `demo` | No | Returns 503 "database not configured" |
+| `demo-db` | Yes (CloudNativePG) | Works - GET/POST items |
+
+Both commands use the same backend image. The only difference is whether `DATABASE_URL` is set.
 
 
 ## Developer tools: doctor, lint and fmt

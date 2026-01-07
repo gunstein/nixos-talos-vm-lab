@@ -23,6 +23,7 @@ Commands:
   wipe
   net-recreate   (explicit destructive, only when needed)
   demo           (build, deploy and expose the demo: frontend + backend)
+  demo-db        (demo with CloudNativePG database)
 
 Examples:
   cd /etc/nixos/talos-host

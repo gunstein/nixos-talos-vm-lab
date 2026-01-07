@@ -359,6 +359,130 @@ EOF
 }
 
 
+cmd_demo_db() {
+  log "== DEMO WITH DATABASE =="
+  need kubectl
+  need systemctl
+  need sed
+  need cp
+
+  [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
+
+  local cp cp_name cp_ip
+  cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
+  cp_name="$(echo "$cp" | awk '{print $1}')"
+  cp_ip="$(echo "$cp" | awk '{print $2}')"
+
+  # In single-node labs, the only node is usually tainted as control-plane:NoSchedule.
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/master- >/dev/null 2>&1 || true
+
+  # Install local-path-provisioner for storage (idempotent)
+  log "Install local-path-provisioner (storage)"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/local-path-provisioner.yaml" >/dev/null
+
+  log "Wait for local-path-provisioner"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage rollout status deploy/local-path-provisioner --timeout=2m; then
+    log "local-path-provisioner rollout timed out."
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage get pods -o wide || true
+    die "local-path-provisioner rollout timed out"
+  fi
+
+  # Install CloudNativePG operator (idempotent)
+  log "Install CloudNativePG operator"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply --server-side -f "$ROOT/k8s/addons/cloudnativepg-operator.yaml" >/dev/null
+
+  log "Wait for CloudNativePG operator"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=3m; then
+    log "CloudNativePG operator rollout timed out."
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n cnpg-system get pods -o wide || true
+    die "cnpg-controller-manager rollout timed out"
+  fi
+
+  # Build + push backend image
+  if [[ "${DEMO_BUILD:-1}" != "0" ]]; then
+    "${ROOT}/scripts/demo-backend-build.sh"
+  else
+    log "DEMO_BUILD=0 -> skip backend build/push"
+  fi
+
+  local manifests="$ROOT/k8s/apps/frontend-demo"
+  [[ -d "$manifests" ]] || die "Missing manifests dir: $manifests"
+
+  local registry_addr
+  registry_addr="${TALOS_GATEWAY}:5000"
+
+  # Apply manifests in correct order:
+  # 1. First apply everything except backend (namespace, frontend, database cluster)
+  # 2. Wait for database to be ready (creates the secret)
+  # 3. Then apply backend with DATABASE_URL
+
+  local tmp
+  tmp="$(mktemp -d)"
+  cp -R "${manifests}/." "${tmp}/"
+
+  # Remove both backend deployments for now
+  rm -f "${tmp}/50-backend-deployment.yaml"
+  rm -f "${tmp}/51-backend-deployment-db.yaml"
+
+  log "Apply demo manifests (without backend) from: ${tmp}"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$tmp" >/dev/null
+
+  log "Wait for database cluster to be ready"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo wait --for=condition=Ready cluster/demo-db --timeout=5m 2>/dev/null; then
+    log "Database cluster not ready. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get cluster demo-db -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -l cnpg.io/cluster=demo-db -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
+    rm -rf "$tmp"
+    die "demo-db cluster not ready"
+  fi
+
+  # Now apply backend with DATABASE_URL (secret exists now)
+  cp "${manifests}/51-backend-deployment-db.yaml" "${tmp}/"
+  sed -i "s|__REGISTRY_ADDR__|${registry_addr}|g" "${tmp}/51-backend-deployment-db.yaml"
+
+  log "Apply backend deployment (with DATABASE_URL)"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "${tmp}/51-backend-deployment-db.yaml" >/dev/null
+  rm -rf "$tmp"
+
+  log "Wait for backend rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-backend --timeout=5m; then
+    log "Backend rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "demo-backend rollout timed out"
+  fi
+
+  log "Wait for frontend rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m; then
+    log "Frontend rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
+    die "demo-frontend rollout timed out"
+  fi
+
+  log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
+  cat > /etc/talos-frontend-proxy.env <<EOF
+LISTEN_PORT=8080
+TARGET_IP=${cp_ip}
+TARGET_PORT=30080
+EOF
+
+  systemctl restart talos-frontend-proxy.service
+
+  log "OK. Demo with database deployed!"
+  log ""
+  log "Test from inside this VM:"
+  log "  curl -sS http://127.0.0.1:8080/"
+  log "  curl -sS http://127.0.0.1:8080/api/hello"
+  log "  curl -sS http://127.0.0.1:8080/api/items"
+  log "  curl -X POST http://127.0.0.1:8080/api/items -H 'Content-Type: application/json' -d '{\"name\":\"test\"}'"
+  log ""
+  log "Connect to database:"
+  log "  kubectl -n demo exec -it demo-db-1 -- psql -U demo -d demo"
+}
+
+
 cmd_all() {
   cmd_up
   cmd_provision
@@ -374,5 +498,6 @@ case "$CMD" in
   verify) cmd_verify ;;
   all) cmd_all ;;
   demo) cmd_demo ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo)" ;;
+  demo-db) cmd_demo_db ;;
+  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db)" ;;
 esac

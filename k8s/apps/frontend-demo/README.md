@@ -25,3 +25,18 @@ Inside the Talos lab network, the demo is reachable at:
 In this repository we typically forward it outward:
 
 LAN → Ubuntu → NixOS-host VM (8080) → Talos node (30080)
+
+
+## Demo with database (`demo-db`)
+
+Use `./scripts/lab lab1 demo-db` to deploy with CloudNativePG PostgreSQL.
+
+Additional endpoints when database is enabled:
+- `GET /api/items` - List all items
+- `POST /api/items` - Create item (body: `{"name": "..."}`)
+
+The database cluster (`demo-db`) is created in the `demo` namespace. CloudNativePG automatically creates a Secret (`demo-db-app`) with the connection URI.
+
+Files specific to database mode:
+- `51-backend-deployment-db.yaml` - Backend with `DATABASE_URL` env var
+- `65-database-cluster.yaml` - CloudNativePG Cluster resource

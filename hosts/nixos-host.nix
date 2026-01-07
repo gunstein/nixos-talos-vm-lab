@@ -54,6 +54,7 @@ in
     bash coreutils gnugrep gawk util-linux
     iproute2 iputils netcat-openbsd socat
     git vim tmux
+    gnumake
 
     # Virtualization
     libvirt qemu_kvm qemu virt-manager virt-viewer

@@ -1,0 +1,32 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: demo-db
+  namespace: demo
+spec:
+  instances: 1
+
+  storage:
+    size: 1Gi
+    storageClass: local-path
+
+  bootstrap:
+    initdb:
+      database: demo
+      owner: demo
+      postInitApplicationSQLRefs:
+        secretRefs: []
+        configMapRefs:
+          - name: demo-db-init
+            key: init.sql
+
+  # Allow scheduling on control-plane nodes (single-node labs)
+  affinity:
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+    podAntiAffinityType: preferred
