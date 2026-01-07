@@ -23,6 +23,6 @@ data:
         proxy_set_header X-Forwarded-Proto $scheme;
 
         # ClusterIP service
-        proxy_pass http://demo-backend.demo.svc.cluster.local:8080;
+        proxy_pass http://demo-backend.demo.svc.cluster.local:8000;
       }
     }

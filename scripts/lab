@@ -22,7 +22,7 @@ Commands:
   all
   wipe
   net-recreate   (explicit destructive, only when needed)
-  demo-frontend  (deploy + expose the demo frontend)
+  demo           (build, deploy and expose the demo: frontend + backend)
 
 Examples:
   cd /etc/nixos/talos-host

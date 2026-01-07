@@ -176,12 +176,27 @@ install_metrics_server_overwrite() {
 }
 
 # ---- generate talos configs ----
+LOCAL_REGISTRY_ENABLE="${LOCAL_REGISTRY_ENABLE:-1}"
+LOCAL_REGISTRY_ADDR="${LOCAL_REGISTRY_ADDR:-${TALOS_GATEWAY}:5000}"
+
 PATCH_FILE="$(mktemp)"
-cat > "$PATCH_FILE" <<'EOF'
+{
+  cat <<EOF
 machine:
   install:
     disk: /dev/vda
 EOF
+
+  if [[ "${LOCAL_REGISTRY_ENABLE}" != "0" ]]; then
+    cat <<EOF
+  registries:
+    mirrors:
+      "${LOCAL_REGISTRY_ADDR}":
+        endpoints:
+          - "http://${LOCAL_REGISTRY_ADDR}"
+EOF
+  fi
+} > "$PATCH_FILE"
 
 log "Generating Talos configs in $GEN_DIR"
 rm -f "$GEN_DIR"/{controlplane.yaml,worker.yaml,talosconfig} 2>/dev/null || true

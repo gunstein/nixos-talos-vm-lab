@@ -45,10 +45,15 @@ This section explains the key folders/files you’ll touch most often.
 │   └── lab2/
 │       ├── vars.env
 │       └── nodes.csv
+├── apps/
+│   └── demo-backend/
+│       ├── Dockerfile
+│       └── main.go
 ├── scripts/
 │   ├── common.sh
 │   ├── install.sh
 │   ├── lab.sh
+│   ├── demo-backend-build.sh
 │   ├── talos-provision.sh
 │   ├── talos-verify.sh
 │   ├── doctor
@@ -62,7 +67,6 @@ This section explains the key folders/files you’ll touch most often.
 │           ├── 15-frontend-nginx-config.yaml
 │           ├── 20-frontend-deployment.yaml
 │           ├── 30-frontend-service-nodeport.yaml
-│           ├── 40-backend-nginx-config.yaml
 │           ├── 50-backend-deployment.yaml
 │           └── 60-backend-service.yaml
 ├── assets/
@@ -93,8 +97,12 @@ This section explains the key folders/files you’ll touch most often.
   - **`lint` / `fmt`**: bash linting (ShellCheck) and formatting (shfmt).
   - **`common.sh`**: shared helpers and error handling (ERR trap).
 
+- **`apps/demo-backend/`**
+  - Source code for the demo backend (Go HTTP server + Dockerfile).
+  - Built with Podman and pushed to the local registry by `scripts/demo-backend-build.sh`.
+
 - **`k8s/apps/frontend-demo/`**
-  - Demo manifests deployed by `./scripts/lab <profile> demo-frontend`.
+  - Kubernetes manifests deployed by `./scripts/lab <profile> demo`.
   - Contains both **frontend + backend**; frontend proxies `/api/*` to the backend.
   - Frontend is exposed via NodePort `30080`, then forwarded to `:8080` by the NixOS-host proxy.
 
@@ -130,8 +138,22 @@ This will:
 - rsync the repo to `/etc/nixos/talos-host`
 - ensure `hardware-configuration.nix` is present
 - ensure the Talos ISO exists in the deploy tree
-- run `nixos-rebuild switch`  
-  (can be skipped with `NO_REBUILD=1`)
+- run `nixos-rebuild switch`
+
+### Skipping the rebuild
+
+If you only changed bash scripts (not `.nix` files), you can skip the rebuild:
+
+```bash
+NO_REBUILD=1 sudo ./scripts/install.sh
+```
+
+This is useful when:
+- You're iterating on scripts and want faster deploys
+- The NixOS configuration hasn't changed
+- You're offline and can't download packages
+
+**Note:** If you changed any `.nix` files (e.g. `hosts/nixos-host.nix`, `flake.nix`), you must run the full rebuild for those changes to take effect.
 
 After this step, you should work **only** from:
 
@@ -285,10 +307,9 @@ Ready for further experimentation (CNI choices, storage, workloads, etc.).
 This repo includes a **super simple** demo stack in the `demo` namespace:
 
 - **Frontend**: `demo-frontend` (nginx) serves a static page and proxies `/api/*` to the backend.
-- **Backend**: `demo-backend` (nginx) serves a tiny JSON API at `/api/hello`.
+- **Backend**: `demo-backend` (Go HTTP server) serves a tiny JSON API at `/api/hello`.
 - **Exposure**: the frontend is exposed via a fixed **NodePort `30080`**, then forwarded through the NixOS-host proxy on **`:8080`**.
 
-> Note: The command is still called `demo-frontend`, but it deploys the full demo stack.
 
 ### Step A: start the lab (if not already running)
 
@@ -300,17 +321,18 @@ cd /etc/nixos/talos-host
 sudo ./scripts/lab lab1 all
 ```
 
-### Step B: deploy the demo stack + enable the NixOS-host forwarder
+### Step B: build and deploy the demo
 
 ```bash
-sudo ./scripts/lab lab1 demo-frontend
+sudo ./scripts/lab lab1 demo
 ```
 
 This will:
-- `kubectl apply -f k8s/apps/frontend-demo`
-- wait for `demo-backend` and `demo-frontend` rollouts (if you added the backend rollout wait)
-- write `/etc/talos-frontend-proxy.env`
-- restart the NixOS-host systemd service `talos-frontend-proxy`
+- Build the backend image with Podman and push it to the local registry
+- Apply the Kubernetes manifests from `k8s/apps/frontend-demo`
+- Wait for `demo-backend` and `demo-frontend` rollouts
+- Write `/etc/talos-frontend-proxy.env`
+- Restart the NixOS-host systemd service `talos-frontend-proxy`
 
 ### Step C: test inside the NixOS-host VM
 
@@ -359,11 +381,10 @@ The demo manifests deploy:
 - Deployments: `demo-frontend`, `demo-backend`
 - Services:
   - `demo-frontend` (NodePort 30080)
-  - `demo-backend` (ClusterIP 8080)
+  - `demo-backend` (ClusterIP 8000)
 - ConfigMaps:
   - `demo-frontend-html`
-  - `demo-frontend-nginx-conf` (proxies `/api/*`)
-  - `demo-backend-nginx-conf` (serves `/api/hello`)
+  - `demo-frontend-nginx-conf` (proxies `/api/*` to backend)
 
 ### Notes
 
@@ -460,3 +481,49 @@ nix develop -c ./scripts/fmt
 
 - If you change scripts: run `fmt` + `lint` before you commit.
 - If a lab fails: run `doctor` first — it often reveals environment/network issues quickly.
+
+## Using the Makefile (optional)
+
+This repo ships with a small `Makefile` that provides convenient shortcuts for the existing scripts.
+It does **not** replace the scripts in `./scripts/` — it only calls them.
+
+### Common commands
+
+```bash
+# Show available targets
+make help
+
+# Health checks (read-only)
+make doctor LAB=lab1
+make doctor LAB=lab2
+
+# Create/boot/provision/verify a lab
+make lab-all LAB=lab1
+make lab-all LAB=lab2
+
+# Build, deploy and expose the demo (frontend + backend)
+make demo LAB=lab1
+make demo LAB=lab2
+
+# Format and lint bash scripts
+make fmt
+make lint
+```
+
+### Run fmt/lint via the Nix devshell
+
+If you use `nix develop`, you can run formatting and linting through the devshell:
+
+```bash
+make fmt-nix
+make lint-nix
+```
+
+### Notes
+
+- `LAB` defaults to `lab1` if not set.
+- Targets that need root privileges use `sudo` by default. You can override it:
+
+```bash
+make lab-all LAB=lab1 SUDO=""
+```

@@ -23,7 +23,7 @@ let
     fi
 
     # Show routes for debugging (helpful when you ssh back in)
-    ${pkgs.iproute2}/bin/ip route | sed -n '1,120p' || true
+    ${pkgs.iproute2}/bin/ip route | sed -n '1,80p' || true
   '';
 in
 {
@@ -60,12 +60,22 @@ in
 
     # Talos/Kubernetes tooling
     talosctl kubectl
+
+    # Local image build/push (demo backend)
+    podman buildah skopeo curl
   ];
 
   virtualisation.libvirtd.enable = true;
   virtualisation.libvirtd.onBoot = "start";
   virtualisation.libvirtd.onShutdown = "shutdown";
 
+  # Podman (daemonless) for building/pushing demo images
+  virtualisation.podman.enable = true;
+  virtualisation.podman.dockerCompat = true;
+
+  # IMPORTANT for nested libvirt:
+  # libvirt's default network often uses 192.168.122.0/24, which can conflict with
+  # the host VM's management network (also commonly 192.168.122.0/24).
   systemd.services.libvirt-disable-default-network = {
     description = "Disable libvirt default network (avoid nested 192.168.122.0/24 route conflicts)";
     after = [ "libvirtd.service" "virtqemud.service" "virtnetworkd.service" "network-online.target" ];
@@ -79,17 +89,33 @@ in
     };
   };
 
-  # If firewall is enabled, allow Ubuntu host to reach the forwarding port inside this VM
-  networking.firewall.allowedTCPPorts = [ 8080 ];
 
-  # Forward :8080 on this VM -> NodePort inside Talos lab (configured by demo-frontend step)
+
+
+  # Local container image registry (HTTP) for the lab
+  services.dockerRegistry = {
+    enable = true;
+    listenAddress = "0.0.0.0";
+    port = 5000;
+    enableDelete = true;
+  };
+
+  # Allow Ubuntu host to reach the forwarding port inside this VM
+  # and allow Talos nodes to reach the local registry.
+  networking.firewall.allowedTCPPorts = [ 8080 5000 ];
+
+  # Optional helper: expose the current lab's demo frontend via this VM on :8080.
+  # The lab command `demo-frontend` writes /etc/talos-frontend-proxy.env and restarts this service.
+  #
+  # NOTE: systemd does NOT expand environment variables in ExecStart unless a shell is involved.
+  # We therefore use a tiny wrapper script that sources the env-file and then execs socat.
   systemd.services.talos-frontend-proxy = let
     proxyScript = pkgs.writeShellScript "talos-frontend-proxy" ''
       set -euo pipefail
       source /etc/talos-frontend-proxy.env
       exec ${pkgs.socat}/bin/socat \
-        "TCP-LISTEN:$LISTEN_PORT,fork,reuseaddr" \
-        "TCP:$TARGET_IP:$TARGET_PORT"
+        "TCP-LISTEN:''${LISTEN_PORT},fork,reuseaddr" \
+        "TCP:''${TARGET_IP}:''${TARGET_PORT}"
     '';
   in {
     description = "Talos lab: forward NixOS-host :8080 to current lab frontend NodePort";
@@ -98,6 +124,7 @@ in
     wantedBy = [ "multi-user.target" ];
 
     unitConfig = {
+      # Don't start until the lab has been created + demo-frontend has been configured.
       ConditionPathExists = "/etc/talos-frontend-proxy.env";
     };
 
@@ -107,6 +134,5 @@ in
       RestartSec = 2;
     };
   };
-
   system.stateVersion = "24.11";
 }

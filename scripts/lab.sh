@@ -20,7 +20,7 @@ need qemu-img
 
 PROFILE="${1:-}"
 CMD="${2:-}"
-[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh <profile> <cmd> (status|up|provision|verify|all|wipe|net-recreate|demo-frontend)"
+[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh <profile> <cmd> (status|up|provision|verify|all|wipe|net-recreate|demo)"
 
 load_profile "$PROFILE"
 csv_init
@@ -276,10 +276,12 @@ cmd_verify() {
 }
 
 
-cmd_demo_frontend() {
-  log "== DEMO FRONTEND =="
+cmd_demo() {
+  log "== DEMO (frontend + backend) =="
   need kubectl
   need systemctl
+  need sed
+  need cp
 
   [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
 
@@ -288,15 +290,53 @@ cmd_demo_frontend() {
   cp_name="$(echo "$cp" | awk '{print $1}')"
   cp_ip="$(echo "$cp" | awk '{print $2}')"
 
+  # In single-node labs, the only node is usually tainted as control-plane:NoSchedule.
+  # We keep it lab-friendly and remove those taints automatically.
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/master- >/dev/null 2>&1 || true
+
+  # Build + push backend image into the local registry on the NixOS-host.
+  # You can skip rebuilds by exporting DEMO_BUILD=0.
+  if [[ "${DEMO_BUILD:-1}" != "0" ]]; then
+    "${ROOT}/scripts/demo-backend-build.sh"
+  else
+    log "DEMO_BUILD=0 -> skip backend build/push"
+  fi
+
   local manifests="$ROOT/k8s/apps/frontend-demo"
   [[ -d "$manifests" ]] || die "Missing manifests dir: $manifests"
 
-  log "Apply demo frontend manifests: $manifests"
-  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$manifests" >/dev/null
+  # Talos nodes pull images via the libvirt gateway (NixOS-host) on this lab network.
+  local registry_addr
+  registry_addr="${TALOS_GATEWAY}:5000"
 
-  log "Wait for deployment rollouts"
-  kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-backend --timeout=5m
-  kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m
+  # Apply manifests, but first substitute the backend image registry address.
+  local tmp
+  tmp="$(mktemp -d)"
+  cp -R "${manifests}/." "${tmp}/"
+  sed -i "s|__REGISTRY_ADDR__|${registry_addr}|g" "${tmp}/50-backend-deployment.yaml"
+
+  log "Apply demo manifests (rendered) from: ${tmp}"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$tmp" >/dev/null
+  rm -rf "$tmp"
+
+  log "Wait for backend rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-backend --timeout=5m; then
+    log "Backend rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "demo-backend rollout timed out"
+  fi
+
+  log "Wait for frontend rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m; then
+    log "Frontend rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
+    log "Node taints (common issue in single-node labs):"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" describe node "${cp_name}" | sed -n '/Taints:/,/Addresses:/p' || true
+    die "demo-frontend rollout timed out"
+  fi
 
   log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
   cat > /etc/talos-frontend-proxy.env <<EOF
@@ -312,9 +352,10 @@ EOF
   log "  curl -sS http://127.0.0.1:8080/api/hello"
   log "Or directly inside the Talos lab network:"
   log "  curl -sS http://${cp_ip}:30080/"
+  log "  curl -sS http://${cp_ip}:30080/api/hello"
 
   log "To make it reachable from your LAN (outside the Ubuntu host):"
-  log "  set up a small forwarder on Ubuntu: extras/ubuntu/install-frontend-forward.sh"
+  log "  set up a forwarder on Ubuntu: extras/ubuntu/install-frontend-forward.sh"
 }
 
 
@@ -332,6 +373,6 @@ case "$CMD" in
   provision) cmd_provision ;;
   verify) cmd_verify ;;
   all) cmd_all ;;
-  demo-frontend) cmd_demo_frontend ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo-frontend)" ;;
+  demo) cmd_demo ;;
+  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo)" ;;
 esac
