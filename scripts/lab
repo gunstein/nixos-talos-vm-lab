@@ -24,6 +24,7 @@ Commands:
   net-recreate   (explicit destructive, only when needed)
   demo           (build, deploy and expose the demo: frontend + backend)
   demo-db        (demo with CloudNativePG database)
+  monitoring     (deploy Prometheus + Grafana observability stack)
 
 Examples:
   cd /etc/nixos/talos-host

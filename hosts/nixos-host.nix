@@ -103,7 +103,8 @@ in
 
   # Allow Ubuntu host to reach the forwarding port inside this VM
   # and allow Talos nodes to reach the local registry.
-  networking.firewall.allowedTCPPorts = [ 8080 5000 ];
+  # 8080 = demo frontend, 5000 = container registry, 3000 = Grafana
+  networking.firewall.allowedTCPPorts = [ 8080 5000 3000 ];
 
   # Optional helper: expose the current lab's demo frontend via this VM on :8080.
   # The lab command `demo-frontend` writes /etc/talos-frontend-proxy.env and restarts this service.
@@ -135,5 +136,33 @@ in
       RestartSec = 2;
     };
   };
+
+  # Grafana proxy: forward NixOS-host :3000 to Grafana NodePort in the lab.
+  # The lab command `monitoring` writes /etc/talos-grafana-proxy.env and restarts this service.
+  systemd.services.talos-grafana-proxy = let
+    proxyScript = pkgs.writeShellScript "talos-grafana-proxy" ''
+      set -euo pipefail
+      source /etc/talos-grafana-proxy.env
+      exec ${pkgs.socat}/bin/socat \
+        "TCP-LISTEN:''${LISTEN_PORT},fork,reuseaddr" \
+        "TCP:''${TARGET_IP}:''${TARGET_PORT}"
+    '';
+  in {
+    description = "Talos lab: forward NixOS-host :3000 to Grafana NodePort";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    unitConfig = {
+      ConditionPathExists = "/etc/talos-grafana-proxy.env";
+    };
+
+    serviceConfig = {
+      ExecStart = proxyScript;
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
   system.stateVersion = "24.11";
 }

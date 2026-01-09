@@ -1,5 +1,5 @@
 name,role,mac,ip,vcpus,ram_mb,disk_gb
-talos-cp-1,controlplane,52:54:00:04:80:de,192.168.123.113,2,2048,20
+talos-cp-1,controlplane,52:54:00:04:80:de,192.168.123.113,2,4096,20
 
 # --- Expansion: uncomment/add ---
 # talos-w-1,worker,52:54:00:04:80:11,192.168.123.121,2,2048,20

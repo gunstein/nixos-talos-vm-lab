@@ -483,6 +483,72 @@ EOF
 }
 
 
+cmd_monitoring() {
+  log "== MONITORING STACK =="
+  need kubectl
+
+  [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
+
+  local cp cp_name cp_ip
+  cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
+  cp_name="$(echo "$cp" | awk '{print $1}')"
+  cp_ip="$(echo "$cp" | awk '{print $2}')"
+
+  # In single-node labs, the only node is usually tainted as control-plane:NoSchedule.
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/master- >/dev/null 2>&1 || true
+
+  # Install local-path-provisioner for storage (idempotent)
+  log "Install local-path-provisioner (storage)"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/local-path-provisioner.yaml" >/dev/null
+
+  log "Wait for local-path-provisioner"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage rollout status deploy/local-path-provisioner --timeout=2m; then
+    log "local-path-provisioner rollout timed out."
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage get pods -o wide || true
+    die "local-path-provisioner rollout timed out"
+  fi
+
+  # Install Prometheus
+  log "Install Prometheus"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/prometheus.yaml" >/dev/null
+
+  # Install Grafana
+  log "Install Grafana"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/grafana.yaml" >/dev/null
+
+  log "Wait for Prometheus rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status deploy/prometheus --timeout=3m; then
+    log "Prometheus rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "prometheus rollout timed out"
+  fi
+
+  log "Wait for Grafana rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status deploy/grafana --timeout=3m; then
+    log "Grafana rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "grafana rollout timed out"
+  fi
+
+  log "Configure NixOS-host forwarder for Grafana (3000 -> ${cp_ip}:30300)"
+  cat > /etc/talos-grafana-proxy.env <<EOF
+LISTEN_PORT=3000
+TARGET_IP=${cp_ip}
+TARGET_PORT=30300
+EOF
+
+  systemctl restart talos-grafana-proxy.service
+
+  log "OK. Monitoring stack deployed!"
+  log ""
+  log "Grafana: http://127.0.0.1:3000 (admin/admin)"
+  log "Prometheus (port-forward): kubectl -n monitoring port-forward svc/prometheus 9090:9090"
+}
+
+
 cmd_all() {
   cmd_up
   cmd_provision
@@ -499,5 +565,6 @@ case "$CMD" in
   all) cmd_all ;;
   demo) cmd_demo ;;
   demo-db) cmd_demo_db ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db)" ;;
+  monitoring) cmd_monitoring ;;
+  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db|monitoring)" ;;
 esac

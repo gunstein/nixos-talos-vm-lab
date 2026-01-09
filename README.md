@@ -529,6 +529,65 @@ nix develop -c ./scripts/fmt
 - If you change scripts: run `fmt` + `lint` before you commit.
 - If a lab fails: run `doctor` first — it often reveals environment/network issues quickly.
 
+## 10. Monitoring stack (Prometheus + Grafana)
+
+The lab includes a simple observability stack with Prometheus and Grafana for learning debugging and monitoring.
+
+### Deploy monitoring
+
+```bash
+sudo ./scripts/lab lab1 monitoring
+```
+
+This will:
+- Install `local-path-provisioner` for storage
+- Deploy Prometheus (metrics collection, 7-day retention)
+- Deploy Grafana (visualization, pre-configured with Prometheus datasource)
+- Configure the NixOS-host proxy for Grafana on port 3000
+
+### Access Grafana
+
+From inside the NixOS-host VM:
+
+```bash
+# Open in browser
+http://127.0.0.1:3000
+
+# Credentials: admin / admin
+```
+
+Anonymous read-only access is also enabled for convenience.
+
+### Access Prometheus
+
+Prometheus is only exposed as ClusterIP. Use port-forward to access its UI:
+
+```bash
+kubectl -n monitoring port-forward svc/prometheus 9090:9090
+# Then open http://127.0.0.1:9090
+```
+
+### What gets monitored
+
+Out of the box, Prometheus scrapes:
+- Itself (prometheus job)
+- Any pod with annotation `prometheus.io/scrape: "true"` and `prometheus.io/port: "<port>"`
+
+To add metrics to your own applications, add these annotations to your pod template:
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+```
+
+### Notes
+
+- Prometheus uses 5Gi storage, Grafana uses 1Gi
+- Both require `local-path-provisioner` (installed automatically)
+- Grafana NodePort is 30300, proxied to port 3000 on the NixOS-host
+
+
 ## Using the Makefile (optional)
 
 This repo ships with a small `Makefile` that provides convenient shortcuts for the existing scripts.
