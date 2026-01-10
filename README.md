@@ -550,13 +550,37 @@ This will:
 From inside the NixOS-host VM:
 
 ```bash
-# Open in browser
-http://127.0.0.1:3000
+# Test that Grafana responds
+curl -s http://127.0.0.1:3000/api/health
 
 # Credentials: admin / admin
 ```
 
 Anonymous read-only access is also enabled for convenience.
+
+#### Access from a remote machine via SSH tunnel
+
+If you're working from a machine that can SSH to the NixOS-host VM:
+
+```bash
+# Forward port 3000 to your local machine
+ssh -L 3000:127.0.0.1:3000 <user>@<nixos-host-ip>
+
+# Then open in browser: http://127.0.0.1:3000
+```
+
+#### Access via SSH jump host
+
+If you access the NixOS-host VM through an intermediate host (e.g., laptop → Ubuntu → NixOS-host):
+
+```bash
+# Example: laptop → Ubuntu (192.168.0.104) → NixOS-host (192.168.122.161)
+ssh -L 3000:127.0.0.1:3000 -J user@192.168.0.104 gunstein@192.168.122.161
+
+# Keep the session open, then open in browser: http://127.0.0.1:3000
+```
+
+Replace the IPs and usernames with your actual values.
 
 ### Access Prometheus
 
