@@ -9,14 +9,67 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var db *pgxpool.Pool
+
+// Prometheus metrics
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "endpoint", "status"},
+	)
+
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "endpoint"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
+}
 
 type Item struct {
 	ID        int       `json:"id"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// instrumentHandler wraps an http.HandlerFunc with metrics
+func instrumentHandler(endpoint string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Wrap ResponseWriter to capture status code
+		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		handler(wrapped, r)
+
+		duration := time.Since(start).Seconds()
+		httpRequestsTotal.WithLabelValues(r.Method, endpoint, http.StatusText(wrapped.status)).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, endpoint).Observe(duration)
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 func main() {
@@ -52,8 +105,9 @@ func main() {
 	}
 
 	http.HandleFunc("/healthz", handleHealthz)
-	http.HandleFunc("/api/hello", handleHello(msg))
-	http.HandleFunc("/api/items", handleItems)
+	http.HandleFunc("/api/hello", instrumentHandler("/api/hello", handleHello(msg)))
+	http.HandleFunc("/api/items", instrumentHandler("/api/items", handleItems))
+	http.Handle("/metrics", promhttp.Handler())
 
 	log.Println("demo-backend listening on :8000")
 	log.Fatal(http.ListenAndServe(":8000", nil))

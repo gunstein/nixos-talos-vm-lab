@@ -311,9 +311,11 @@ cmd_demo() {
   registry_addr="${TALOS_GATEWAY}:5000"
 
   # Apply manifests, but first substitute the backend image registry address.
+  # Exclude database-related files (51-*, 64-*, 65-*) - those are for demo-db only.
   local tmp
   tmp="$(mktemp -d)"
   cp -R "${manifests}/." "${tmp}/"
+  rm -f "${tmp}"/51-*.yaml "${tmp}"/64-*.yaml "${tmp}"/65-*.yaml
   sed -i "s|__REGISTRY_ADDR__|${registry_addr}|g" "${tmp}/50-backend-deployment.yaml"
 
   log "Apply demo manifests (rendered) from: ${tmp}"

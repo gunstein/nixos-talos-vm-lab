@@ -45,8 +45,8 @@ metadata:
 data:
   prometheus.yml: |
     global:
-      scrape_interval: 30s
-      evaluation_interval: 30s
+      scrape_interval: 10s
+      evaluation_interval: 10s
     scrape_configs:
       - job_name: 'prometheus'
         static_configs:

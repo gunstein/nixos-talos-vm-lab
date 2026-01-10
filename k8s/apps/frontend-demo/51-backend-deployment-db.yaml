@@ -12,6 +12,9 @@ spec:
     metadata:
       labels:
         app: demo-backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
     spec:
       # Single-node lab? Allow scheduling on control-plane too.
       tolerations:
