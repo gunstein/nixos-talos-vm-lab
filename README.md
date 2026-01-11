@@ -612,6 +612,103 @@ annotations:
 - Grafana NodePort is 30300, proxied to port 3000 on the NixOS-host
 
 
+## 11. Ingress with Traefik (TLS)
+
+Traefik Ingress Controller routes all traffic through HTTPS on port 443 with hostname-based routing. It is installed automatically as part of `lab all`.
+
+### How it works
+
+When you run `./scripts/lab lab1 all`, Traefik is automatically installed with:
+- A self-signed CA and wildcard certificate for `*.lab.local`
+- TLS termination on port 443
+- HTTP→HTTPS redirect
+
+Services deployed with `demo` or `monitoring` automatically get Ingress resources.
+
+### Configure hosts file
+
+Add to `/etc/hosts` on the machine where you run your browser:
+
+```bash
+# If accessing via SSH tunnel
+127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local
+
+# Or if accessing from another machine, use the NixOS-host IP
+192.168.122.161 demo.lab.local grafana.lab.local prometheus.lab.local
+```
+
+### Access services via SSH tunnel
+
+```bash
+# From laptop via jump host (port 443 for HTTPS)
+ssh -L 443:127.0.0.1:443 -J user@ubuntu-host gunstein@nixos-host
+
+# Then open in browser
+https://demo.lab.local
+https://grafana.lab.local
+https://prometheus.lab.local
+```
+
+### Trust the CA certificate
+
+To avoid browser warnings, import the CA certificate:
+
+```bash
+# The CA cert is at:
+/etc/nixos/talos-host/certs/ca.crt
+
+# Copy it to your machine and import into your browser/OS
+```
+
+**macOS:**
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt
+```
+
+**Linux (Chrome/Chromium):**
+```bash
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Talos Lab CA" -i ca.crt
+```
+
+**Firefox:** Settings → Privacy & Security → Certificates → View Certificates → Import
+
+### Traefik Dashboard
+
+```bash
+# Port-forward to access dashboard
+kubectl -n traefik-system port-forward svc/traefik 8080:8080
+# Then open http://127.0.0.1:8080
+
+# Or access via NodePort
+http://<node-ip>:30088
+```
+
+### Architecture
+
+```
+Browser → NixOS-host:443 → Traefik (NodePort 30443)
+                                 ├── demo.lab.local      → demo-frontend
+                                 ├── grafana.lab.local   → Grafana
+                                 └── prometheus.lab.local → Prometheus
+```
+
+### Manual Ingress command
+
+If you need to reinstall or reconfigure Ingress manually:
+
+```bash
+sudo ./scripts/lab lab1 ingress
+```
+
+### Notes
+
+- Traefik is installed automatically in `cmd_all()`
+- CA and certificates are stored in `/etc/nixos/talos-host/certs/`
+- Certificates are valid for 1 year, CA for 10 years
+- Legacy proxies (port 8080, 3000) still work for backward compatibility
+- Traefik exposes Prometheus metrics (auto-scraped)
+
+
 ## Using the Makefile (optional)
 
 This repo ships with a small `Makefile` that provides convenient shortcuts for the existing scripts.

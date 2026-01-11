@@ -37,6 +37,7 @@ help:
 	@echo "  make demo              - build, deploy and expose the demo (./scripts/lab $(LAB) demo)"
 	@echo "  make demo-db           - demo with CloudNativePG database (./scripts/lab $(LAB) demo-db)"
 	@echo "  make monitoring        - deploy Prometheus + Grafana (./scripts/lab $(LAB) monitoring)"
+	@echo "  make ingress           - deploy Traefik Ingress Controller (./scripts/lab $(LAB) ingress)"
 	@echo ""
 	@echo "Convenience kubectl (requires kubeconfig already present):"
 	@echo "  make k8s-nodes         - kubectl get nodes"
@@ -85,6 +86,9 @@ demo-db:
 
 monitoring:
 	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) monitoring
+
+ingress:
+	cd $(ROOT) && $(SUDO) ./scripts/lab $(LAB) ingress
 
 # Aliases (keep your existing naming in scripts; make just provides shortcuts)
 demo-only: demo

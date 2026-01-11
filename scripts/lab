@@ -25,6 +25,7 @@ Commands:
   demo           (build, deploy and expose the demo: frontend + backend)
   demo-db        (demo with CloudNativePG database)
   monitoring     (deploy Prometheus + Grafana observability stack)
+  ingress        (deploy Traefik Ingress Controller)
 
 Examples:
   cd /etc/nixos/talos-host

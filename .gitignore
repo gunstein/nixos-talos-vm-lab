@@ -1,3 +1,6 @@
 
 # Large binaries
 assets/*.iso
+
+# Generated TLS certificates (sensitive)
+certs/

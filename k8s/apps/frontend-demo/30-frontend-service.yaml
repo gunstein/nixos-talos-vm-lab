@@ -4,11 +4,10 @@ metadata:
   name: demo-frontend
   namespace: demo
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: demo-frontend
   ports:
     - name: http
       port: 80
       targetPort: 8080
-      nodePort: 30080

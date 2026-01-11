@@ -36,6 +36,11 @@ in
   networking.hostName = "nixos";
   networking.networkmanager.enable = true;
 
+  # Lab hostnames for Traefik Ingress (via local proxy)
+  networking.extraHosts = ''
+    127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local
+  '';
+
   services.openssh.enable = true;
 
   boot.loader.systemd-boot.enable = true;
@@ -64,6 +69,9 @@ in
 
     # Local image build/push (demo backend)
     podman buildah skopeo curl
+
+    # TLS certificate generation
+    openssl
   ];
 
   virtualisation.libvirtd.enable = true;
@@ -103,8 +111,8 @@ in
 
   # Allow Ubuntu host to reach the forwarding port inside this VM
   # and allow Talos nodes to reach the local registry.
-  # 8080 = demo frontend, 5000 = container registry, 3000 = Grafana
-  networking.firewall.allowedTCPPorts = [ 8080 5000 3000 ];
+  # 443 = Traefik ingress (TLS), 8080 = demo frontend (legacy), 5000 = container registry, 3000 = Grafana (legacy)
+  networking.firewall.allowedTCPPorts = [ 443 8080 5000 3000 ];
 
   # Optional helper: expose the current lab's demo frontend via this VM on :8080.
   # The lab command `demo-frontend` writes /etc/talos-frontend-proxy.env and restarts this service.
@@ -155,6 +163,33 @@ in
 
     unitConfig = {
       ConditionPathExists = "/etc/talos-grafana-proxy.env";
+    };
+
+    serviceConfig = {
+      ExecStart = proxyScript;
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
+  # Ingress proxy: forward NixOS-host :443 to Traefik TLS NodePort in the lab.
+  # The lab command `ingress` writes /etc/talos-ingress-proxy.env and restarts this service.
+  systemd.services.talos-ingress-proxy = let
+    proxyScript = pkgs.writeShellScript "talos-ingress-proxy" ''
+      set -euo pipefail
+      source /etc/talos-ingress-proxy.env
+      exec ${pkgs.socat}/bin/socat \
+        "TCP-LISTEN:''${LISTEN_PORT},fork,reuseaddr" \
+        "TCP:''${TARGET_IP}:''${TARGET_PORT}"
+    '';
+  in {
+    description = "Talos lab: forward NixOS-host :443 to Traefik Ingress TLS NodePort";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    unitConfig = {
+      ConditionPathExists = "/etc/talos-ingress-proxy.env";
     };
 
     serviceConfig = {

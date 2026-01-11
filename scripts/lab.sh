@@ -285,10 +285,9 @@ cmd_demo() {
 
   [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
 
-  local cp cp_name cp_ip
+  local cp cp_name
   cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
   cp_name="$(echo "$cp" | awk '{print $1}')"
-  cp_ip="$(echo "$cp" | awk '{print $2}')"
 
   # In single-node labs, the only node is usually tainted as control-plane:NoSchedule.
   # We keep it lab-friendly and remove those taints automatically.
@@ -340,24 +339,10 @@ cmd_demo() {
     die "demo-frontend rollout timed out"
   fi
 
-  log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
-  cat > /etc/talos-frontend-proxy.env <<EOF
-LISTEN_PORT=8080
-TARGET_IP=${cp_ip}
-TARGET_PORT=30080
-EOF
-
-  systemctl restart talos-frontend-proxy.service
-
-  log "OK. Test from inside this VM:"
-  log "  curl -sS http://127.0.0.1:8080/"
-  log "  curl -sS http://127.0.0.1:8080/api/hello"
-  log "Or directly inside the Talos lab network:"
-  log "  curl -sS http://${cp_ip}:30080/"
-  log "  curl -sS http://${cp_ip}:30080/api/hello"
-
-  log "To make it reachable from your LAN (outside the Ubuntu host):"
-  log "  set up a forwarder on Ubuntu: extras/ubuntu/install-frontend-forward.sh"
+  # Create Ingress resource for Traefik
+  log "Create Ingress for demo"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
+  log "OK. Access via: https://demo.lab.local"
 }
 
 
@@ -463,22 +448,29 @@ cmd_demo_db() {
     die "demo-frontend rollout timed out"
   fi
 
-  log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
-  cat > /etc/talos-frontend-proxy.env <<EOF
+  # If Traefik is installed, switch to ClusterIP and create Ingress
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
+    log "Traefik detected - configuring Ingress for demo"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/31-frontend-service-clusterip.yaml" >/dev/null
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
+    log "OK. Access via: https://demo.lab.local"
+  else
+    # Legacy: configure NixOS-host forwarder for NodePort
+    log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
+    cat > /etc/talos-frontend-proxy.env <<EOF
 LISTEN_PORT=8080
 TARGET_IP=${cp_ip}
 TARGET_PORT=30080
 EOF
+    systemctl restart talos-frontend-proxy.service
+    log "OK. Test from inside this VM:"
+    log "  curl -sS http://127.0.0.1:8080/"
+  fi
 
-  systemctl restart talos-frontend-proxy.service
-
-  log "OK. Demo with database deployed!"
   log ""
-  log "Test from inside this VM:"
-  log "  curl -sS http://127.0.0.1:8080/"
-  log "  curl -sS http://127.0.0.1:8080/api/hello"
-  log "  curl -sS http://127.0.0.1:8080/api/items"
-  log "  curl -X POST http://127.0.0.1:8080/api/items -H 'Content-Type: application/json' -d '{\"name\":\"test\"}'"
+  log "Database endpoints:"
+  log "  curl -sS https://demo.lab.local/api/items"
+  log "  curl -X POST https://demo.lab.local/api/items -H 'Content-Type: application/json' -d '{\"name\":\"test\"}'"
   log ""
   log "Connect to database:"
   log "  kubectl -n demo exec -it demo-db-1 -- psql -U demo -d demo"
@@ -535,19 +527,140 @@ cmd_monitoring() {
     die "grafana rollout timed out"
   fi
 
-  log "Configure NixOS-host forwarder for Grafana (3000 -> ${cp_ip}:30300)"
-  cat > /etc/talos-grafana-proxy.env <<EOF
+  # If Traefik is installed, create Ingress resources
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
+    log "Traefik detected - configuring Ingress for monitoring"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/grafana-ingress.yaml" >/dev/null
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/prometheus-ingress.yaml" >/dev/null
+    log "OK. Monitoring stack deployed!"
+    log ""
+    log "Grafana: https://grafana.lab.local (admin/admin)"
+    log "Prometheus: https://prometheus.lab.local"
+  else
+    # Legacy: configure NixOS-host forwarder for NodePort
+    log "Configure NixOS-host forwarder for Grafana (3000 -> ${cp_ip}:30300)"
+    cat > /etc/talos-grafana-proxy.env <<EOF
 LISTEN_PORT=3000
 TARGET_IP=${cp_ip}
 TARGET_PORT=30300
 EOF
+    systemctl restart talos-grafana-proxy.service
+    log "OK. Monitoring stack deployed!"
+    log ""
+    log "Grafana: http://127.0.0.1:3000 (admin/admin)"
+    log "Prometheus (port-forward): kubectl -n monitoring port-forward svc/prometheus 9090:9090"
+  fi
+}
 
-  systemctl restart talos-grafana-proxy.service
 
-  log "OK. Monitoring stack deployed!"
+# Helper: install Traefik if not already running
+install_traefik() {
+  # Check if Traefik is already running
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
+    log "Traefik already installed"
+    return 0
+  fi
+
+  # Generate CA and certificates if not present
+  local cert_dir="${ROOT}/certs"
+  if [[ ! -f "${cert_dir}/ca.crt" ]]; then
+    log "Generate TLS certificates"
+    "${ROOT}/scripts/generate-ca.sh" "${cert_dir}"
+  fi
+
+  log "Install Traefik Ingress Controller"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/traefik.yaml" >/dev/null
+
+  # Create TLS secret in traefik-system namespace
+  log "Create TLS secret for Traefik"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system create secret tls traefik-tls \
+    --cert="${cert_dir}/server.crt" \
+    --key="${cert_dir}/server.key" \
+    --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null
+
+  # Also create in demo and monitoring namespaces (for Ingress resources)
+  for ns in demo monitoring; do
+    kubectl --kubeconfig "$KUBECONFIG_OUT" create namespace "$ns" --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null 2>&1 || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n "$ns" create secret tls traefik-tls \
+      --cert="${cert_dir}/server.crt" \
+      --key="${cert_dir}/server.key" \
+      --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null
+  done
+
+  log "Wait for Traefik rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system rollout status deploy/traefik --timeout=3m; then
+    log "Traefik rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "traefik rollout timed out"
+  fi
+
   log ""
-  log "Grafana: http://127.0.0.1:3000 (admin/admin)"
-  log "Prometheus (port-forward): kubectl -n monitoring port-forward svc/prometheus 9090:9090"
+  log "TLS certificates generated. To trust the CA, import:"
+  log "  ${cert_dir}/ca.crt"
+}
+
+# Helper: configure ingress proxy on NixOS-host
+configure_ingress_proxy() {
+  local cp_ip="$1"
+
+  log "Configure NixOS-host forwarder (443 -> ${cp_ip}:30443)"
+  cat > /etc/talos-ingress-proxy.env <<EOF
+LISTEN_PORT=443
+TARGET_IP=${cp_ip}
+TARGET_PORT=30443
+EOF
+
+  systemctl restart talos-ingress-proxy.service || log "WARN: talos-ingress-proxy.service not found - run nixos-rebuild switch"
+}
+
+cmd_ingress() {
+  log "== INGRESS (Traefik) =="
+  need kubectl
+
+  [[ -f "$KUBECONFIG_OUT" ]] || die "Missing kubeconfig: $KUBECONFIG_OUT (run: sudo ./scripts/lab ${PROFILE} provision)"
+
+  local cp cp_name cp_ip
+  cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
+  cp_name="$(echo "$cp" | awk '{print $1}')"
+  cp_ip="$(echo "$cp" | awk '{print $2}')"
+
+  # In single-node labs, remove control-plane taints
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$KUBECONFIG_OUT" taint nodes "${cp_name}" node-role.kubernetes.io/master- >/dev/null 2>&1 || true
+
+  install_traefik
+
+  # Change demo-frontend from NodePort to ClusterIP (if demo namespace exists)
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" get namespace demo >/dev/null 2>&1; then
+    log "Update demo-frontend service to ClusterIP"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/31-frontend-service-clusterip.yaml" >/dev/null
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
+  fi
+
+  # Apply monitoring ingress resources (if monitoring namespace exists)
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" get namespace monitoring >/dev/null 2>&1; then
+    log "Apply Ingress for Grafana and Prometheus"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/grafana-ingress.yaml" >/dev/null
+    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/prometheus-ingress.yaml" >/dev/null
+  fi
+
+  configure_ingress_proxy "$cp_ip"
+
+  log "OK. Ingress deployed!"
+  log ""
+  log "Add to /etc/hosts on your machine:"
+  log "  ${cp_ip} demo.lab.local grafana.lab.local prometheus.lab.local"
+  log ""
+  log "Or if accessing via SSH tunnel, add to laptop /etc/hosts:"
+  log "  127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local"
+  log ""
+  log "Then access:"
+  log "  https://demo.lab.local"
+  log "  https://grafana.lab.local"
+  log "  https://prometheus.lab.local"
+  log ""
+  log "Traefik dashboard: http://${cp_ip}:30088 (or port-forward)"
 }
 
 
@@ -555,6 +668,28 @@ cmd_all() {
   cmd_up
   cmd_provision
   cmd_verify
+
+  # Install Traefik Ingress Controller
+  log "== INGRESS SETUP =="
+  local cp cp_ip
+  cp="$(first_controlplane)" || die "No controlplane found in nodes.csv"
+  cp_ip="$(echo "$cp" | awk '{print $2}')"
+
+  install_traefik
+  configure_ingress_proxy "$cp_ip"
+
+  # Deploy demo app and monitoring stack
+  cmd_demo
+  cmd_monitoring
+
+  log ""
+  log "Lab ready! Add to /etc/hosts on your machine:"
+  log "  ${cp_ip} demo.lab.local grafana.lab.local prometheus.lab.local"
+  log ""
+  log "Access via:"
+  log "  https://demo.lab.local"
+  log "  https://grafana.lab.local (admin/admin)"
+  log "  https://prometheus.lab.local"
 }
 
 case "$CMD" in
@@ -568,5 +703,6 @@ case "$CMD" in
   demo) cmd_demo ;;
   demo-db) cmd_demo_db ;;
   monitoring) cmd_monitoring ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db|monitoring)" ;;
+  ingress) cmd_ingress ;;
+  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db|monitoring|ingress)" ;;
 esac
