@@ -37,7 +37,7 @@ rm -f /var/lib/libvirt/images/nixos-host.qcow2
 # Prepare UEFI vars
 cp /usr/share/OVMF/OVMF_VARS_4M.fd /var/lib/libvirt/qemu/nvram/nixos-host_VARS.fd
 
-# Create the VM (8GB RAM minimum recommended, 4GB shown here)
+# Create the VM (8GB RAM recommended for running Talos VMs inside)
 virt-install \
   --name nixos-host \
   --memory 8192 \
@@ -494,125 +494,43 @@ Ready for further experimentation (CNI choices, storage, workloads, etc.).
 
 ---
 
-## 8. Demo stack (frontend + backend, no database yet)
+## 8. Demo stack
 
-This repo includes a **super simple** demo stack in the `demo` namespace:
+The demo stack is deployed automatically when you run `lab1 all`. It includes:
 
-- **Frontend**: `demo-frontend` (nginx) serves a static page and proxies `/api/*` to the backend.
-- **Backend**: `demo-backend` (Go HTTP server) serves a tiny JSON API at `/api/hello`.
-- **Exposure**: the frontend is exposed via a fixed **NodePort `30080`**, then forwarded through the NixOS-host proxy on **`:8080`**.
+- **Frontend**: `demo-frontend` (nginx) serves a static page and proxies `/api/*` to the backend
+- **Backend**: `demo-backend` (Go HTTP server) with `/api/hello` and `/api/items` endpoints
+- **Database**: PostgreSQL via CloudNativePG
+- **Exposure**: via Traefik Ingress at `https://demo.lab.local`
 
-
-### Step A: start the lab (if not already running)
-
-Follow the normal workflow from earlier sections (deploy + `lab <name> all`), e.g.:
+### Test the demo (on NixOS-host)
 
 ```bash
-sudo ./scripts/install.sh
-cd /etc/nixos/talos-host
-sudo ./scripts/lab lab1 all
-```
+# Frontend page
+curl -k https://demo.lab.local/
 
-### Step B: build and deploy the demo
+# Backend hello endpoint
+curl -k https://demo.lab.local/api/hello
 
-```bash
-sudo ./scripts/lab lab1 demo
-```
-
-This will:
-- Build the backend image with Podman and push it to the local registry
-- Apply the Kubernetes manifests from `k8s/apps/frontend-demo`
-- Wait for `demo-backend` and `demo-frontend` rollouts
-- Write `/etc/talos-frontend-proxy.env`
-- Restart the NixOS-host systemd service `talos-frontend-proxy`
-
-### Step C: test inside the NixOS-host VM
-
-```bash
-# Frontend
-curl -sS http://127.0.0.1:8080/ | head
-
-# Backend (proxied through the frontend)
-curl -sS http://127.0.0.1:8080/api/hello
-```
-
-### Optional: expose it to your LAN via Ubuntu (outside the Ubuntu host)
-
-You have two simple options:
-
-**Option 1 (recommended if you want a helper script):** use the forwarder in `extras/ubuntu/`
-
-```bash
-# on Ubuntu (host), in this repo
-cd extras/ubuntu
-sudo ./install-frontend-forward.sh <NIXOS_HOST_VM_IP>
-```
-
-Then from any machine on your LAN:
-
-- `http://<ubuntu-lan-ip>:8080/`
-- `http://<ubuntu-lan-ip>:8080/api/hello`
-
-**Option 2 (quick/temporary):** run a one-liner forwarder in a terminal on Ubuntu
-
-```bash
-sudo socat TCP-LISTEN:8080,fork,reuseaddr TCP:<NIXOS_HOST_VM_IP>:8080
-```
-
-Tip: find the NixOS-host VM IP from Ubuntu with:
-
-```bash
-sudo virsh domifaddr <vm-name>
-```
-
-### Kubernetes objects
-
-The demo manifests deploy:
-
-- Namespace: `demo`
-- Deployments: `demo-frontend`, `demo-backend`
-- Services:
-  - `demo-frontend` (NodePort 30080)
-  - `demo-backend` (ClusterIP 8000)
-- ConfigMaps:
-  - `demo-frontend-html`
-  - `demo-frontend-nginx-conf` (proxies `/api/*` to backend)
-
-### Notes
-
-- The manifests are compatible with PodSecurity `restricted` (run as non-root, drop capabilities, no privilege escalation, `RuntimeDefault` seccomp).
-
-
-## 9. Demo with database (CloudNativePG)
-
-You can also deploy the demo stack with a PostgreSQL database using CloudNativePG.
-
-### Deploy with database
-
-```bash
-sudo ./scripts/lab lab1 demo-db
-```
-
-This will:
-- Install `local-path-provisioner` for storage (vendored in `k8s/addons/`)
-- Install the CloudNativePG operator (vendored in `k8s/addons/`)
-- Create a PostgreSQL cluster (`demo-db`) in the `demo` namespace
-- Deploy the backend with `DATABASE_URL` environment variable
-- The backend connects to the database and enables `/api/items` endpoints
-
-### Test the database endpoints
-
-```bash
-# List items (empty at first)
-curl http://127.0.0.1:8080/api/items
-
-# Create an item
-curl -X POST http://127.0.0.1:8080/api/items \
+# Database endpoints
+curl -k https://demo.lab.local/api/items
+curl -k -X POST https://demo.lab.local/api/items \
   -H "Content-Type: application/json" \
   -d '{"name":"my first item"}'
+curl -k https://demo.lab.local/api/items
+```
 
-# List items again
-curl http://127.0.0.1:8080/api/items
+### Access from laptop via SSH tunnel
+
+```bash
+# Start tunnel (keep open)
+sudo ssh -L 443:127.0.0.1:443 -J user@jump-host gunstein@nixos-host
+
+# Add to /etc/hosts on laptop
+127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local
+
+# Open in browser
+https://demo.lab.local
 ```
 
 ### Connect to the database directly
@@ -621,14 +539,29 @@ curl http://127.0.0.1:8080/api/items
 kubectl -n demo exec -it demo-db-1 -- psql -U demo -d demo
 ```
 
-### Difference between `demo` and `demo-db`
+### Deploy demo separately (without database)
 
-| Command | Database | `/api/items` |
-|---------|----------|--------------|
-| `demo` | No | Returns 503 "database not configured" |
-| `demo-db` | Yes (CloudNativePG) | Works - GET/POST items |
+If you want to run the demo without a database:
 
-Both commands use the same backend image. The only difference is whether `DATABASE_URL` is set.
+```bash
+sudo ./scripts/lab lab1 demo
+```
+
+This deploys frontend + backend but without PostgreSQL. The `/api/items` endpoint will return 503.
+
+### Kubernetes objects
+
+- Namespace: `demo`
+- Deployments: `demo-frontend`, `demo-backend`
+- Services: `demo-frontend` (ClusterIP), `demo-backend` (ClusterIP)
+- Ingress: `demo-frontend` (routes `demo.lab.local` via Traefik)
+- Database: `demo-db` (CloudNativePG cluster)
+
+### Notes
+
+- The manifests are compatible with PodSecurity `restricted`
+- Backend image is built with Podman and pushed to local registry
+- Database uses `local-path-provisioner` for storage
 
 
 ## Developer tools: doctor, lint and fmt

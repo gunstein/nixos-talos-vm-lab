@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-shfmt -w -i 2 -ci -sr scripts/*.sh
+# Format all bash scripts (both .sh and extensionless)
+shfmt -w -i 2 -ci -sr scripts/*.sh scripts/lab scripts/doctor scripts/lint scripts/fmt

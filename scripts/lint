@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-shellcheck -x scripts/*.sh
+# Lint all bash scripts (both .sh and extensionless)
+shellcheck -x scripts/*.sh scripts/lab scripts/doctor scripts/lint scripts/fmt
