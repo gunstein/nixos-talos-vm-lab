@@ -448,24 +448,10 @@ cmd_demo_db() {
     die "demo-frontend rollout timed out"
   fi
 
-  # If Traefik is installed, switch to ClusterIP and create Ingress
-  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
-    log "Traefik detected - configuring Ingress for demo"
-    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/31-frontend-service-clusterip.yaml" >/dev/null
-    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
-    log "OK. Access via: https://demo.lab.local"
-  else
-    # Legacy: configure NixOS-host forwarder for NodePort
-    log "Configure NixOS-host forwarder (8080 -> ${cp_ip}:30080)"
-    cat > /etc/talos-frontend-proxy.env <<EOF
-LISTEN_PORT=8080
-TARGET_IP=${cp_ip}
-TARGET_PORT=30080
-EOF
-    systemctl restart talos-frontend-proxy.service
-    log "OK. Test from inside this VM:"
-    log "  curl -sS http://127.0.0.1:8080/"
-  fi
+  # Create Ingress resource for Traefik
+  log "Create Ingress for demo"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
+  log "OK. Access via: https://demo.lab.local"
 
   log ""
   log "Database endpoints:"
@@ -631,10 +617,9 @@ cmd_ingress() {
 
   install_traefik
 
-  # Change demo-frontend from NodePort to ClusterIP (if demo namespace exists)
+  # Create Ingress for demo (if demo namespace exists)
   if kubectl --kubeconfig "$KUBECONFIG_OUT" get namespace demo >/dev/null 2>&1; then
-    log "Update demo-frontend service to ClusterIP"
-    kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/31-frontend-service-clusterip.yaml" >/dev/null
+    log "Create Ingress for demo"
     kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/apps/frontend-demo/35-ingress.yaml" >/dev/null
   fi
 
@@ -678,8 +663,8 @@ cmd_all() {
   install_traefik
   configure_ingress_proxy "$cp_ip"
 
-  # Deploy demo app and monitoring stack
-  cmd_demo
+  # Deploy demo app (with database) and monitoring stack
+  cmd_demo_db
   cmd_monitoring
 
   log ""
