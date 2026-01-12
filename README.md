@@ -10,6 +10,184 @@ Goals:
 
 ---
 
+## Prerequisites
+
+Before using this repo, you need:
+
+1. A host machine with libvirt/KVM (e.g., Ubuntu or another Linux distro)
+2. A NixOS VM running on that host (the "NixOS-host")
+3. The Talos ISO downloaded to the correct location
+
+---
+
+## 0. Creating the NixOS-host VM
+
+This section explains how to create the NixOS VM that will host the Talos lab. Skip this if you already have a NixOS-host VM.
+
+### 0.1 Create the VM with virt-install
+
+On your host machine (e.g., Ubuntu):
+
+```bash
+# Clean up any existing VM with the same name
+virsh destroy nixos-host 2>/dev/null || true
+virsh undefine nixos-host --nvram 2>/dev/null || true
+rm -f /var/lib/libvirt/images/nixos-host.qcow2
+
+# Prepare UEFI vars
+cp /usr/share/OVMF/OVMF_VARS_4M.fd /var/lib/libvirt/qemu/nvram/nixos-host_VARS.fd
+
+# Create the VM (8GB RAM minimum recommended, 4GB shown here)
+virt-install \
+  --name nixos-host \
+  --memory 8192 \
+  --vcpus 4 \
+  --cpu host \
+  --machine q35 \
+  --boot loader=/usr/share/OVMF/OVMF_CODE_4M.fd,loader.readonly=yes,loader.type=pflash,nvram=/var/lib/libvirt/qemu/nvram/nixos-host_VARS.fd \
+  --disk path=/var/lib/libvirt/images/nixos-host.qcow2,size=40,bus=virtio \
+  --cdrom /var/lib/libvirt/images/iso/nixos-minimal-25.11.xxxx-x86_64-linux.iso \
+  --network network=default,model=virtio \
+  --graphics spice \
+  --video virtio \
+  --os-variant nixos-unstable
+```
+
+Download the NixOS minimal ISO from https://nixos.org/download/ and place it in `/var/lib/libvirt/images/iso/`.
+
+### 0.2 Install NixOS
+
+In the VM console (via virt-manager or virsh console):
+
+```bash
+# Set Norwegian keyboard layout
+sudo loadkeys no
+
+# Set password for nixos user (so you can SSH in)
+passwd nixos
+
+# Start SSH and find the IP
+sudo -i
+systemctl start sshd
+ip -br a
+```
+
+SSH in from your host (much easier to work with):
+
+```bash
+ssh nixos@<vm-ip>
+sudo -i
+```
+
+Partition and format the disk:
+
+```bash
+# Partition
+parted /dev/vda -- mklabel gpt
+parted /dev/vda -- mkpart ESP fat32 1MiB 512MiB
+parted /dev/vda -- set 1 esp on
+parted /dev/vda -- mkpart primary 512MiB 100%
+
+# Format
+mkfs.fat -F32 /dev/vda1
+mkfs.ext4 /dev/vda2
+
+# Mount
+mount /dev/vda2 /mnt
+mkdir -p /mnt/boot
+mount /dev/vda1 /mnt/boot
+```
+
+Generate and edit config:
+
+```bash
+nixos-generate-config --root /mnt
+nano /mnt/etc/nixos/configuration.nix
+```
+
+Minimal required changes in `configuration.nix`:
+
+```nix
+# Enable SSH
+services.openssh.enable = true;
+
+# Create your user
+users.users.gunstein = {
+  isNormalUser = true;
+  extraGroups = [ "wheel" ];
+};
+```
+
+Install and reboot:
+
+```bash
+nixos-install
+reboot
+```
+
+After reboot, log in as root and set password for your user:
+
+```bash
+passwd gunstein
+```
+
+### 0.3 Download the Talos ISO
+
+Download `metal-amd64.iso` from https://github.com/siderolabs/talos/releases and place it in the `assets/` folder of this repo:
+
+```bash
+# On your laptop/workstation
+cd nixos-talos-vm-lab
+mkdir -p assets
+# Download to assets/metal-amd64.iso
+```
+
+### 0.4 Copy the repo to NixOS-host
+
+From your laptop/workstation:
+
+```bash
+# Direct copy
+scp -r nixos-talos-vm-lab gunstein@<nixos-host-ip>:~/
+
+# Or via jump host
+scp -r -J user@jump-host nixos-talos-vm-lab gunstein@<nixos-host-ip>:~/
+```
+
+Or use rsync for incremental updates:
+
+```bash
+rsync -a --delete -e "ssh -J user@jump-host" \
+  nixos-talos-vm-lab/ gunstein@<nixos-host-ip>:~/nixos-talos-vm-lab/
+```
+
+### 0.5 Snapshots (recommended)
+
+Take snapshots at key points so you can restore quickly:
+
+```bash
+# On the host machine (not inside the VM)
+
+# After fresh NixOS install (before any lab setup)
+virsh snapshot-create-as nixos-host fresh-install "Clean NixOS install"
+
+# After running install.sh (NixOS configured for Talos lab)
+virsh snapshot-create-as nixos-host configured "Ready for Talos lab"
+
+# List snapshots
+virsh snapshot-list nixos-host
+
+# Restore to a snapshot
+virsh snapshot-revert nixos-host fresh-install
+
+# Delete a snapshot
+virsh snapshot-delete nixos-host <snapshot-name>
+```
+
+**Tip:** Take a snapshot before major changes. If something breaks, you can restore in seconds instead of reinstalling.
+
+---
+
 ## Overview
 
 ### Roles
@@ -60,13 +238,19 @@ This section explains the key folders/files you’ll touch most often.
 │   ├── lint
 │   └── fmt
 ├── k8s/
+│   ├── addons/
+│   │   ├── traefik.yaml
+│   │   ├── prometheus.yaml
+│   │   ├── grafana.yaml
+│   │   └── ...
 │   └── apps/
 │       └── frontend-demo/
 │           ├── 00-namespace.yaml
 │           ├── 10-frontend-configmap.yaml
 │           ├── 15-frontend-nginx-config.yaml
 │           ├── 20-frontend-deployment.yaml
-│           ├── 30-frontend-service-nodeport.yaml
+│           ├── 30-frontend-service.yaml
+│           ├── 35-ingress.yaml
 │           ├── 50-backend-deployment.yaml
 │           └── 60-backend-service.yaml
 ├── assets/
@@ -178,14 +362,22 @@ This performs, in order:
 4. Kubernetes bootstrap
 5. kubeconfig generation
 6. cluster verification
+7. Traefik Ingress with TLS
+8. Demo app with PostgreSQL database
+9. Prometheus + Grafana monitoring
 
-After completion:
+After completion, all services are accessible via HTTPS:
+- https://demo.lab.local
+- https://grafana.lab.local (admin/admin)
+- https://prometheus.lab.local
 
 ```bash
 kubectl get nodes
 ```
 
 should work without any extra configuration.
+
+See [section 11](#11-ingress-with-traefik-tls) for how to configure hosts file and SSH tunnel for browser access.
 
 ---
 
