@@ -175,45 +175,65 @@ install_metrics_server_overwrite() {
   log "metrics-server installed; Metrics API is Available"
 }
 
-# ---- generate talos configs ----
+# ---- generate talos configs (idempotent) ----
 LOCAL_REGISTRY_ENABLE="${LOCAL_REGISTRY_ENABLE:-1}"
 LOCAL_REGISTRY_ADDR="${LOCAL_REGISTRY_ADDR:-${TALOS_GATEWAY}:5000}"
 
-PATCH_FILE="$(mktemp)"
-{
-  cat <<EOF
+# Check if configs already exist and are valid
+CONFIGS_EXIST=0
+if [[ -f "$GEN_DIR/controlplane.yaml" ]] && \
+   [[ -f "$GEN_DIR/worker.yaml" ]] && \
+   [[ -f "$GEN_DIR/talosconfig" ]]; then
+  # Verify talosconfig is valid YAML with expected fields
+  if grep -q "context:" "$GEN_DIR/talosconfig" 2>/dev/null; then
+    CONFIGS_EXIST=1
+    log "Talos configs already exist in $GEN_DIR (reusing)"
+  fi
+fi
+
+if [[ "$CONFIGS_EXIST" -eq 0 ]]; then
+  PATCH_FILE="$(mktemp)"
+  {
+    cat <<EOF
 machine:
   install:
     disk: /dev/vda
 EOF
 
-  if [[ "${LOCAL_REGISTRY_ENABLE}" != "0" ]]; then
-    cat <<EOF
+    if [[ "${LOCAL_REGISTRY_ENABLE}" != "0" ]]; then
+      cat <<EOF
   registries:
     mirrors:
       "${LOCAL_REGISTRY_ADDR}":
         endpoints:
           - "http://${LOCAL_REGISTRY_ADDR}"
 EOF
+    fi
+  } > "$PATCH_FILE"
+
+  log "Generating Talos configs in $GEN_DIR"
+  rm -f "$GEN_DIR"/{controlplane.yaml,worker.yaml,talosconfig} 2>/dev/null || true
+
+  if supports_flag "talosctl gen config" "--config-patch"; then
+    talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" \
+      --output-dir "$GEN_DIR" \
+      --config-patch "@${PATCH_FILE}" >/dev/null
+  else
+    log "WARN: talosctl gen config does not support --config-patch."
+    talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" --output-dir "$GEN_DIR" >/dev/null
   fi
-} > "$PATCH_FILE"
-
-log "Generating Talos configs in $GEN_DIR"
-rm -f "$GEN_DIR"/{controlplane.yaml,worker.yaml,talosconfig} 2>/dev/null || true
-
-if supports_flag "talosctl gen config" "--config-patch"; then
-  talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" \
-    --output-dir "$GEN_DIR" \
-    --config-patch "@${PATCH_FILE}" >/dev/null
-else
-  log "WARN: talosctl gen config does not support --config-patch."
-  talosctl gen config "$TALOS_CLUSTER_NAME" "https://${CP_IP}:6443" --output-dir "$GEN_DIR" >/dev/null
+  rm -f "$PATCH_FILE"
 fi
-rm -f "$PATCH_FILE"
 
 export TALOSCONFIG="$GEN_DIR/talosconfig"
 
-# ---- apply configs ----
+# ---- apply configs (idempotent) ----
+node_configured() {
+  local ip="$1"
+  # Check if node already has mTLS configured (responds to talosctl version)
+  talosctl --nodes "$ip" --endpoints "$ip" version >/dev/null 2>&1
+}
+
 while IFS= read -r row; do
   name="$(csv_get "$row" name)"
   role="$(csv_get "$row" role)"
@@ -221,6 +241,12 @@ while IFS= read -r row; do
 
   log "Waiting for Talos port on ${name} ${ip}:50000"
   wait_port "$ip" 50000 300 || die "Talos API port not reachable on ${ip}:50000"
+
+  # Check if node is already configured (mTLS working)
+  if node_configured "$ip"; then
+    log "Node ${name} (${ip}) already configured (mTLS OK, skipping apply-config)"
+    continue
+  fi
 
   cfg="$GEN_DIR/worker.yaml"
   [[ "$role" == "controlplane" ]] && cfg="$GEN_DIR/controlplane.yaml"

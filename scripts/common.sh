@@ -25,7 +25,37 @@ if [[ -z "${__COMMON_ERR_TRAP_INSTALLED:-}" ]]; then
 fi
 
 
+# Logging configuration
+TALOS_LAB_VERBOSE="${TALOS_LAB_VERBOSE:-0}"
+TALOS_LAB_DEBUG="${TALOS_LAB_DEBUG:-0}"
+TALOS_LAB_LOG_DIR="${TALOS_LAB_LOG_DIR:-/var/log/talos-vm-lab}"
+TALOS_LAB_LOG_FILE=""
+
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+log_warn() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARN: $*" >&2; }
+log_error() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: $*" >&2; }
+log_debug() { [[ "$TALOS_LAB_DEBUG" == "1" ]] && echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DEBUG: $*"; return 0; }
+
+log_init() {
+  local profile="${1:-unknown}"
+  local cmd="${2:-unknown}"
+  local log_dir="${TALOS_LAB_LOG_DIR}/${profile}"
+
+  if [[ "$EUID" -eq 0 ]]; then
+    mkdir -p "$log_dir" 2>/dev/null || true
+    if [[ -d "$log_dir" && -w "$log_dir" ]]; then
+      local ts
+      ts="$(date +%Y%m%d-%H%M%S)"
+      TALOS_LAB_LOG_FILE="${log_dir}/${ts}-${cmd}.log"
+      touch "$TALOS_LAB_LOG_FILE" 2>/dev/null || TALOS_LAB_LOG_FILE=""
+    fi
+  fi
+
+  if [[ "$TALOS_LAB_DEBUG" == "1" ]]; then
+    set -x
+  fi
+}
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
@@ -46,6 +76,9 @@ require_root() {
       HOME=/root \
       PATH=/run/current-system/sw/bin:/usr/bin:/bin \
       TERM="${TERM:-xterm-256color}" \
+      TALOS_LAB_VERBOSE="${TALOS_LAB_VERBOSE:-0}" \
+      TALOS_LAB_DEBUG="${TALOS_LAB_DEBUG:-0}" \
+      TALOS_LAB_LOG_DIR="${TALOS_LAB_LOG_DIR:-/var/log/talos-vm-lab}" \
       "$0" "$@"
   fi
 }

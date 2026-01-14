@@ -2,6 +2,63 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
+# Parse flags before require_root (which re-execs)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verbose|-v)
+      export TALOS_LAB_VERBOSE=1
+      shift
+      ;;
+    --debug|-d)
+      export TALOS_LAB_DEBUG=1
+      export TALOS_LAB_VERBOSE=1
+      shift
+      ;;
+    --help|-h)
+      cat <<EOF
+Usage: lab.sh [OPTIONS] <profile> <command>
+
+Commands:
+  plan          Show what will happen (dry-run preview)
+  status        Show VM and network status
+  up            Create VMs and start network
+  provision     Generate Talos config and bootstrap cluster
+  verify        Verify cluster is healthy
+  all           Run up + provision + verify + demo-db + monitoring
+  wipe          Destroy VMs, network, and Talos state
+  net-recreate  Recreate libvirt network
+  demo          Deploy demo app (in-memory backend)
+  demo-db       Deploy demo app with PostgreSQL database
+  monitoring    Deploy Prometheus, Loki, and Grafana
+  ingress       Deploy Traefik Ingress Controller
+
+Options:
+  -v, --verbose   Show more detailed output
+  -d, --debug     Enable debug mode (set -x, extra logging)
+  -h, --help      Show this help message
+
+Environment variables:
+  TALOS_LAB_VERBOSE=1   Same as --verbose
+  TALOS_LAB_DEBUG=1     Same as --debug
+  TALOS_LAB_LOG_DIR     Log directory (default: /var/log/talos-vm-lab)
+
+Examples:
+  sudo ./scripts/lab.sh lab1 plan              # Preview what will happen
+  sudo ./scripts/lab.sh lab1 all               # Full setup
+  sudo ./scripts/lab.sh --verbose lab1 status  # Verbose status
+  TALOS_LAB_DEBUG=1 sudo ./scripts/lab.sh lab1 up
+EOF
+      exit 0
+      ;;
+    -*)
+      die "Unknown option: $1 (use --help for usage)"
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 require_root "$@"
 
 need virsh
@@ -20,7 +77,10 @@ need qemu-img
 
 PROFILE="${1:-}"
 CMD="${2:-}"
-[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh <profile> <cmd> (status|up|provision|verify|all|wipe|net-recreate|demo)"
+[[ -n "$PROFILE" && -n "$CMD" ]] || die "Usage: lab.sh [OPTIONS] <profile> <cmd> (use --help for details)"
+
+# Initialize logging
+log_init "$PROFILE" "$CMD"
 
 load_profile "$PROFILE"
 csv_init
@@ -59,16 +119,17 @@ net_bridge_of() {
 
 net_start_with_autofix() {
   local err=""
+  log_debug "Attempting to start network: ${TALOS_NET_NAME}"
   if err="$(virsh -c "$LIBVIRT_URI" net-start "$TALOS_NET_NAME" 2>&1)"; then
     return 0
   fi
 
   if [[ "$err" =~ interface[[:space:]]+([^[:space:]]+) ]]; then
     local bad_if="${BASH_REMATCH[1]}"
-    log "WARN: net-start failed due to interface in use: ${bad_if}"
+    log_warn "net-start failed due to interface in use: ${bad_if}"
 
     if ip link show "$bad_if" >/dev/null 2>&1; then
-      log "WARN: Trying to delete stale bridge '${bad_if}'"
+      log_warn "Trying to delete stale bridge '${bad_if}'"
       ip link set "$bad_if" down 2>/dev/null || true
       ip link delete "$bad_if" type bridge 2>/dev/null || true
     fi
@@ -78,7 +139,7 @@ net_start_with_autofix() {
     return 0
   fi
 
-  log "ERROR: Failed to start network ${TALOS_NET_NAME}"
+  log_error "Failed to start network ${TALOS_NET_NAME}"
   echo "$err" | sed 's/^/[virsh] /'
   die "libvirt refused to start ${TALOS_NET_NAME}"
 }
@@ -112,9 +173,9 @@ net_ensure_started() {
   local existing_bridge
   existing_bridge="$(net_bridge_of "$TALOS_NET_NAME" || true)"
   if [[ -n "$existing_bridge" && "$existing_bridge" != "$TALOS_BRIDGE_NAME" ]]; then
-    log "ERROR: Network drift: ${TALOS_NET_NAME} uses '${existing_bridge}', expected '${TALOS_BRIDGE_NAME}'"
-    log "Run explicitly:"
-    log "  sudo ${ROOT}/scripts/lab.sh ${PROFILE} net-recreate"
+    log_error "Network drift: ${TALOS_NET_NAME} uses '${existing_bridge}', expected '${TALOS_BRIDGE_NAME}'"
+    log_error "Run explicitly:"
+    log_error "  sudo ${ROOT}/scripts/lab.sh ${PROFILE} net-recreate"
     die "Refusing to auto-recreate network in idempotent mode."
   fi
 
@@ -257,8 +318,8 @@ cmd_up() {
 
   log "Waiting for Talos API ${cp_ip}:50000"
   if ! wait_port "$cp_ip" 50000 300; then
-    log "Talos API not reachable. Check VNC:"
-    log "  sudo virsh -c ${LIBVIRT_URI} vncdisplay ${cp_name}"
+    log_error "Talos API not reachable. Check VNC:"
+    log_error "  sudo virsh -c ${LIBVIRT_URI} vncdisplay ${cp_name}"
     die "Talos API not reachable on ${cp_ip}:50000"
   fi
 
@@ -323,7 +384,7 @@ cmd_demo() {
 
   log "Wait for backend rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-backend --timeout=5m; then
-    log "Backend rollout timed out. Quick diagnostics:"
+    log_warn "Backend rollout timed out. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
     die "demo-backend rollout timed out"
@@ -331,10 +392,10 @@ cmd_demo() {
 
   log "Wait for frontend rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo rollout status deploy/demo-frontend --timeout=5m; then
-    log "Frontend rollout timed out. Quick diagnostics:"
+    log_warn "Frontend rollout timed out. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
-    log "Node taints (common issue in single-node labs):"
+    log_warn "Node taints (common issue in single-node labs):"
     kubectl --kubeconfig "$KUBECONFIG_OUT" describe node "${cp_name}" | sed -n '/Taints:/,/Addresses:/p' || true
     die "demo-frontend rollout timed out"
   fi
@@ -370,7 +431,7 @@ cmd_demo_db() {
 
   log "Wait for local-path-provisioner"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage rollout status deploy/local-path-provisioner --timeout=2m; then
-    log "local-path-provisioner rollout timed out."
+    log_warn "local-path-provisioner rollout timed out."
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n local-path-storage get pods -o wide || true
     die "local-path-provisioner rollout timed out"
   fi
@@ -381,7 +442,7 @@ cmd_demo_db() {
 
   log "Wait for CloudNativePG operator"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=3m; then
-    log "CloudNativePG operator rollout timed out."
+    log_warn "CloudNativePG operator rollout timed out."
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n cnpg-system get pods -o wide || true
     die "cnpg-controller-manager rollout timed out"
   fi
@@ -417,7 +478,7 @@ cmd_demo_db() {
 
   log "Wait for database cluster to be ready"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo wait --for=condition=Ready cluster/demo-db --timeout=5m 2>/dev/null; then
-    log "Database cluster not ready. Quick diagnostics:"
+    log_warn "Database cluster not ready. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get cluster demo-db -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get pods -l cnpg.io/cluster=demo-db -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n demo get events --sort-by=.lastTimestamp | tail -n 25 || true
@@ -493,21 +554,44 @@ cmd_monitoring() {
   log "Install Prometheus"
   kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/prometheus.yaml" >/dev/null
 
-  # Install Grafana
+  # Install Loki (log aggregation)
+  log "Install Loki"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/loki.yaml" >/dev/null
+
+  # Install Promtail (log collector)
+  log "Install Promtail"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/promtail.yaml" >/dev/null
+
+  # Install Grafana (includes Loki datasource)
   log "Install Grafana"
   kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/grafana.yaml" >/dev/null
 
   log "Wait for Prometheus rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status deploy/prometheus --timeout=3m; then
-    log "Prometheus rollout timed out. Quick diagnostics:"
+    log_warn "Prometheus rollout timed out. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get events --sort-by=.lastTimestamp | tail -n 25 || true
     die "prometheus rollout timed out"
   fi
 
+  log "Wait for Loki rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status deploy/loki --timeout=3m; then
+    log_warn "Loki rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get events --sort-by=.lastTimestamp | tail -n 25 || true
+    die "loki rollout timed out"
+  fi
+
+  log "Wait for Promtail rollout"
+  if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status daemonset/promtail --timeout=3m; then
+    log_warn "Promtail rollout timed out. Quick diagnostics:"
+    kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
+    die "promtail rollout timed out"
+  fi
+
   log "Wait for Grafana rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring rollout status deploy/grafana --timeout=3m; then
-    log "Grafana rollout timed out. Quick diagnostics:"
+    log_warn "Grafana rollout timed out. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get pods -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n monitoring get events --sort-by=.lastTimestamp | tail -n 25 || true
     die "grafana rollout timed out"
@@ -575,7 +659,7 @@ install_traefik() {
 
   log "Wait for Traefik rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system rollout status deploy/traefik --timeout=3m; then
-    log "Traefik rollout timed out. Quick diagnostics:"
+    log_warn "Traefik rollout timed out. Quick diagnostics:"
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get pods -o wide || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get events --sort-by=.lastTimestamp | tail -n 25 || true
     die "traefik rollout timed out"
@@ -682,7 +766,161 @@ cmd_all() {
   log "  https://prometheus.lab.local"
 }
 
+cmd_plan() {
+  log "== PLAN for profile: ${PROFILE} =="
+  echo ""
+
+  # Network info
+  echo "Network:"
+  echo "  Name:       ${TALOS_NET_NAME}"
+  echo "  Bridge:     ${TALOS_BRIDGE_NAME}"
+  echo "  Gateway:    ${TALOS_GATEWAY}"
+  echo "  DHCP range: ${TALOS_DHCP_START} - ${TALOS_DHCP_END}"
+
+  # Check current network state
+  local net_state="not defined"
+  if virsh -c "$LIBVIRT_URI" net-info "$TALOS_NET_NAME" >/dev/null 2>&1; then
+    local active
+    active="$(virsh -c "$LIBVIRT_URI" net-info "$TALOS_NET_NAME" | awk -F': *' '/^Active:/{print $2}')"
+    if [[ "$active" == "yes" ]]; then
+      net_state="active"
+    else
+      net_state="defined (inactive)"
+    fi
+  fi
+  echo "  Status:     ${net_state}"
+  echo ""
+
+  # VMs table
+  echo "VMs:"
+  printf "  %-20s %-12s %-17s %-8s %-8s %-6s %s\n" "NAME" "ROLE" "IP" "DISK" "RAM" "vCPUs" "STATUS"
+  printf "  %-20s %-12s %-17s %-8s %-8s %-6s %s\n" "--------------------" "------------" "-----------------" "--------" "--------" "------" "----------"
+
+  local total_disk=0 total_ram=0 total_vcpus=0
+  local row name role ip mac disk_gb ram_mb vcpus vm_status
+
+  while IFS= read -r row; do
+    name="$(csv_get "$row" name)"
+    role="$(csv_get "$row" role)"
+    ip="$(csv_get "$row" ip)"
+    disk_gb="$(csv_get "$row" disk_gb)"
+    ram_mb="$(csv_get "$row" ram_mb)"
+    vcpus="$(csv_get "$row" vcpus)"
+
+    # Check current VM state
+    vm_status="to create"
+    if virsh -c "$LIBVIRT_URI" dominfo "$name" >/dev/null 2>&1; then
+      local state
+      state="$(virsh -c "$LIBVIRT_URI" domstate "$name" 2>/dev/null || echo "unknown")"
+      vm_status="$state"
+    fi
+
+    printf "  %-20s %-12s %-17s %-8s %-8s %-6s %s\n" \
+      "$name" "$role" "$ip" "${disk_gb}GB" "${ram_mb}MB" "$vcpus" "[$vm_status]"
+
+    total_disk=$((total_disk + disk_gb))
+    total_ram=$((total_ram + ram_mb))
+    total_vcpus=$((total_vcpus + vcpus))
+  done < <(csv_rows)
+
+  echo ""
+  echo "  Total resources: ${total_disk}GB disk, $((total_ram / 1024))GB RAM, ${total_vcpus} vCPUs"
+  echo ""
+
+  # Talos state
+  echo "Talos state directory: ${TALOS_DIR}"
+  if [[ -d "$TALOS_DIR" ]]; then
+    echo "  Status: exists"
+    [[ -f "${TALOS_DIR}/controlplane.yaml" ]] && echo "  - controlplane.yaml present"
+    [[ -f "${TALOS_DIR}/worker.yaml" ]] && echo "  - worker.yaml present"
+    [[ -f "${TALOS_DIR}/talosconfig" ]] && echo "  - talosconfig present"
+  else
+    echo "  Status: will be created"
+  fi
+  echo ""
+
+  # Kubeconfig
+  echo "Kubeconfig: ${KUBECONFIG_OUT}"
+  if [[ -f "$KUBECONFIG_OUT" ]]; then
+    echo "  Status: exists"
+  else
+    echo "  Status: will be created after provision"
+  fi
+  echo ""
+
+  # ISO
+  echo "Talos ISO: ${ISO}"
+  if [[ -f "$ISO" ]]; then
+    local iso_size
+    iso_size="$(du -h "$ISO" 2>/dev/null | cut -f1)"
+    echo "  Status: present (${iso_size})"
+  else
+    echo "  Status: MISSING - download required!"
+  fi
+  echo ""
+
+  # Addons that 'all' command will install
+  echo "Addons (installed by 'all' command):"
+  echo "  - local-path-provisioner (storage)"
+  echo "  - traefik (ingress controller)"
+  echo "  - cloudnativepg-operator (database operator)"
+  echo "  - prometheus (metrics)"
+  echo "  - loki + promtail (logs)"
+  echo "  - grafana (dashboards)"
+  echo "  - demo-db (demo app with PostgreSQL)"
+  echo ""
+
+  # What will happen
+  echo "Actions for each command:"
+  echo ""
+  echo "  'up' will:"
+  if [[ "$net_state" == "not defined" ]]; then
+    echo "    - Create and start network ${TALOS_NET_NAME}"
+  elif [[ "$net_state" == "defined (inactive)" ]]; then
+    echo "    - Start network ${TALOS_NET_NAME}"
+  else
+    echo "    - Network ${TALOS_NET_NAME} already active (no change)"
+  fi
+
+  while IFS= read -r row; do
+    name="$(csv_get "$row" name)"
+    if virsh -c "$LIBVIRT_URI" dominfo "$name" >/dev/null 2>&1; then
+      local state
+      state="$(virsh -c "$LIBVIRT_URI" domstate "$name" 2>/dev/null || echo "unknown")"
+      if [[ "$state" == "running" ]]; then
+        echo "    - VM ${name}: already running (no change)"
+      else
+        echo "    - VM ${name}: start (currently ${state})"
+      fi
+    else
+      echo "    - VM ${name}: create and start"
+    fi
+  done < <(csv_rows)
+  echo ""
+
+  echo "  'provision' will:"
+  if [[ -d "$TALOS_DIR" ]] && [[ -f "${TALOS_DIR}/controlplane.yaml" ]]; then
+    echo "    - Talos configs exist (will apply to nodes)"
+  else
+    echo "    - Generate Talos configs (secrets, controlplane.yaml, worker.yaml)"
+  fi
+  echo "    - Apply config to each node"
+  echo "    - Bootstrap cluster (if not already bootstrapped)"
+  echo "    - Generate kubeconfig"
+  echo ""
+
+  echo "  'wipe' will:"
+  echo "    - Destroy and undefine all VMs"
+  echo "    - Delete VM disks from ${DISK_DIR}"
+  echo "    - Destroy and undefine network ${TALOS_NET_NAME}"
+  echo "    - Delete Talos state directory ${TALOS_DIR}"
+  echo ""
+
+  log "Plan complete. Run 'sudo ./scripts/lab.sh ${PROFILE} <command>' to execute."
+}
+
 case "$CMD" in
+  plan) cmd_plan ;;
   status) cmd_status ;;
   net-recreate) net_recreate ;;
   wipe) cmd_wipe ;;
@@ -694,5 +932,5 @@ case "$CMD" in
   demo-db) cmd_demo_db ;;
   monitoring) cmd_monitoring ;;
   ingress) cmd_ingress ;;
-  *) die "Unknown cmd: $CMD (use: status|up|provision|verify|all|wipe|net-recreate|demo|demo-db|monitoring|ingress)" ;;
+  *) die "Unknown cmd: $CMD (use: plan|status|up|provision|verify|all|wipe|net-recreate|demo|demo-db|monitoring|ingress)" ;;
 esac

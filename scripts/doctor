@@ -8,130 +8,426 @@ source "$ROOT_DIR/scripts/common.sh"
 usage() {
   cat <<EOF
 Usage:
-  scripts/doctor [lab1|lab2|...] [--no-k8s]
+  scripts/doctor [OPTIONS] [lab1|lab2|...]
 
 Checks host prerequisites and (optionally) validates a lab profile.
+
+Options:
+  --json      Output results as JSON (for CI/automation)
+  --no-k8s    Skip Kubernetes connectivity check
+  -h, --help  Show this help message
+
+Examples:
+  scripts/doctor                    # Basic host checks
+  scripts/doctor single-node        # Check host + validate profile
+  scripts/doctor --json single-node # JSON output for CI
 EOF
 }
 
 PROFILE=""
 CHECK_K8S=1
+OUTPUT_JSON=0
+
+# JSON result accumulator
+declare -a JSON_CHECKS=()
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --no-k8s) CHECK_K8S=0; shift ;;
-    lab*) PROFILE="$1"; shift ;;
-    *) die "Unknown arg: $1" ;;
+    --json) OUTPUT_JSON=1; shift ;;
+    -*) die "Unknown option: $1" ;;
+    *) PROFILE="$1"; shift ;;
   esac
 done
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+# Check result functions with fix hints
+_add_json() {
+  local name="$1" status="$2" message="$3" hint="${4:-}"
+  local hint_json=""
+  [[ -n "$hint" ]] && hint_json=", \"fix_hint\": \"$hint\""
+  JSON_CHECKS+=("{\"name\": \"$name\", \"status\": \"$status\", \"message\": \"$message\"$hint_json}")
 }
 
-ok()  { echo "✅ $*"; }
-warn(){ echo "⚠️  $*" >&2; }
-fail(){ die "$*"; }
+ok() {
+  local name="$1" message="$2"
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    _add_json "$name" "ok" "$message"
+  else
+    echo "✅ [$name] $message"
+  fi
+}
 
+warn() {
+  local name="$1" message="$2" hint="${3:-}"
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    _add_json "$name" "warn" "$message" "$hint"
+  else
+    echo "⚠️  [$name] $message" >&2
+    [[ -n "$hint" ]] && echo "   Fix: $hint" >&2
+  fi
+}
+
+fail() {
+  local name="$1" message="$2" hint="${3:-}"
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    _add_json "$name" "fail" "$message" "$hint"
+  else
+    echo "❌ [$name] $message" >&2
+    [[ -n "$hint" ]] && echo "   Fix: $hint" >&2
+  fi
+  DOCTOR_FAILED=1
+}
+
+DOCTOR_FAILED=0
+
+# ============================================================================
+# CHECK: KVM/Nested Virtualization
+# ============================================================================
 check_kvm() {
   if [[ ! -e /dev/kvm ]]; then
-    fail "/dev/kvm not found (KVM not available). Check BIOS SVM/AMD-V and host configuration."
+    fail "kvm" "/dev/kvm not found (KVM not available)" \
+      "Enable SVM/AMD-V in BIOS, or check: lsmod | grep kvm"
+    return
   fi
-  ok "/dev/kvm present"
-}
 
-check_libvirt() {
-  need_cmd virsh
-
-  # This URI works in your NixOS-host VM setup
-  if ! virsh -c qemu:///system list --all >/dev/null 2>&1; then
-    warn "virsh cannot talk to qemu:///system. Is libvirtd/virtqemud running? Are you in libvirtd group?"
-    warn "Try: sudo systemctl status libvirtd virtqemud virtnetworkd --no-pager"
-    fail "libvirt not reachable"
+  # Check if we can access it
+  if [[ ! -r /dev/kvm ]] || [[ ! -w /dev/kvm ]]; then
+    fail "kvm" "/dev/kvm exists but not accessible" \
+      "Add user to kvm group: sudo usermod -aG kvm \$USER && newgrp kvm"
+    return
   fi
-  ok "libvirt reachable (qemu:///system)"
 
-  # Helpful: detect common route conflict
-  if ip route | grep -qE '^192\.168\.122\.0/24'; then
-    warn "Route 192.168.122.0/24 exists (often libvirt 'default' network)."
-    warn "In nested setups this can conflict with other libvirt networks."
-    warn "If you see weird routing, consider disabling the default network."
+  # Check nested virtualization (useful info)
+  local nested_file=""
+  if [[ -f /sys/module/kvm_intel/parameters/nested ]]; then
+    nested_file="/sys/module/kvm_intel/parameters/nested"
+  elif [[ -f /sys/module/kvm_amd/parameters/nested ]]; then
+    nested_file="/sys/module/kvm_amd/parameters/nested"
+  fi
+
+  if [[ -n "$nested_file" ]]; then
+    local nested_val
+    nested_val="$(cat "$nested_file" 2>/dev/null || echo "N")"
+    if [[ "$nested_val" == "1" || "$nested_val" == "Y" ]]; then
+      ok "kvm" "/dev/kvm present, nested virtualization enabled"
+    else
+      ok "kvm" "/dev/kvm present (nested virt disabled - OK if bare metal)"
+    fi
   else
-    ok "no obvious 192.168.122.0/24 route conflict"
+    ok "kvm" "/dev/kvm present and accessible"
   fi
 }
 
-check_tools() {
-  need_cmd awk
-  need_cmd sed
-  need_cmd ip
-  need_cmd socat
-  need_cmd talosctl
-  need_cmd kubectl
-  need_cmd virsh
-  ok "basic tools present"
+# ============================================================================
+# CHECK: Libvirt
+# ============================================================================
+check_libvirt() {
+  if ! command -v virsh >/dev/null 2>&1; then
+    fail "libvirt" "virsh command not found" \
+      "Install libvirt: nix-shell -p libvirt  OR  apt install libvirt-clients"
+    return
+  fi
+
+  if ! virsh -c qemu:///system list --all >/dev/null 2>&1; then
+    fail "libvirt" "Cannot connect to qemu:///system" \
+      "Check: sudo systemctl status libvirtd virtqemud && sudo usermod -aG libvirt \$USER"
+    return
+  fi
+
+  ok "libvirt" "libvirt reachable (qemu:///system)"
+
+  # Check for common network conflicts
+  if ip route 2>/dev/null | grep -qE '^192\.168\.122\.0/24'; then
+    warn "libvirt-net" "Route 192.168.122.0/24 exists (may conflict in nested setups)" \
+      "Consider: sudo virsh net-destroy default && sudo virsh net-autostart --disable default"
+  fi
 }
 
+# ============================================================================
+# CHECK: Required Tools
+# ============================================================================
+check_tools() {
+  local missing=()
+  local tools=(awk sed ip nc socat qemu-img virt-install)
+
+  for tool in "${tools[@]}"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing+=("$tool")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    fail "tools" "Missing tools: ${missing[*]}" \
+      "Install with your package manager (nix-shell, apt, dnf, etc.)"
+  else
+    ok "tools" "All required tools present (${tools[*]})"
+  fi
+}
+
+# ============================================================================
+# CHECK: talosctl version
+# ============================================================================
+check_talosctl() {
+  if ! command -v talosctl >/dev/null 2>&1; then
+    fail "talosctl" "talosctl not found" \
+      "Install: curl -sL https://talos.dev/install | sh"
+    return
+  fi
+
+  local version
+  version="$(talosctl version --client 2>/dev/null | grep -oP 'Tag:\s*\K[v0-9.]+' | head -1 || echo "unknown")"
+  ok "talosctl" "talosctl installed (version: $version)"
+}
+
+# ============================================================================
+# CHECK: kubectl version
+# ============================================================================
+check_kubectl() {
+  if ! command -v kubectl >/dev/null 2>&1; then
+    fail "kubectl" "kubectl not found" \
+      "Install: curl -LO https://dl.k8s.io/release/stable.txt && curl -LO https://dl.k8s.io/release/\$(cat stable.txt)/bin/linux/amd64/kubectl"
+    return
+  fi
+
+  local version
+  version="$(kubectl version --client -o json 2>/dev/null | grep -oP '"gitVersion":\s*"\K[^"]+' | head -1 || echo "unknown")"
+  ok "kubectl" "kubectl installed (version: $version)"
+}
+
+# ============================================================================
+# CHECK: Disk Space
+# ============================================================================
+check_diskspace() {
+  local min_gb=10  # Minimum for new setup (VMs use sparse/thin disks)
+  local warn_gb=5  # Warning threshold
+  local disk_dir="${DISK_DIR:-/var/lib/libvirt/images}"
+
+  # Use the parent directory if DISK_DIR doesn't exist yet
+  local check_dir="$disk_dir"
+  while [[ ! -d "$check_dir" ]] && [[ "$check_dir" != "/" ]]; do
+    check_dir="$(dirname "$check_dir")"
+  done
+
+  local avail_kb avail_gb
+  avail_kb="$(df -k "$check_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ -z "$avail_kb" ]]; then
+    warn "diskspace" "Could not determine disk space for $check_dir" ""
+    return
+  fi
+
+  avail_gb=$((avail_kb / 1024 / 1024))
+
+  if [[ $avail_gb -lt $warn_gb ]]; then
+    warn "diskspace" "Low disk space: ${avail_gb}GB in $check_dir (may cause issues)" \
+      "Free up disk space or change DISK_DIR in profile vars.env"
+  elif [[ $avail_gb -lt $min_gb ]]; then
+    warn "diskspace" "${avail_gb}GB available in $check_dir (recommend ${min_gb}GB+ for new VMs)" \
+      "VMs use thin-provisioned disks, so existing setups may work fine"
+  else
+    ok "diskspace" "${avail_gb}GB available in $check_dir"
+  fi
+}
+
+# ============================================================================
+# CHECK: CPU/RAM
+# ============================================================================
+check_resources() {
+  # CPU cores
+  local cpus
+  cpus="$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)"
+  if [[ $cpus -lt 2 ]]; then
+    fail "cpu" "Only $cpus CPU core(s) detected (need 2+)" \
+      "Allocate more CPUs to this machine"
+  else
+    ok "cpu" "$cpus CPU cores available"
+  fi
+
+  # RAM
+  local mem_kb mem_gb
+  mem_kb="$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')"
+  if [[ -z "$mem_kb" ]]; then
+    warn "ram" "Could not determine RAM" ""
+    return
+  fi
+
+  mem_gb=$((mem_kb / 1024 / 1024))
+  if [[ $mem_gb -lt 4 ]]; then
+    fail "ram" "Only ${mem_gb}GB RAM detected (need 4GB+)" \
+      "Allocate more RAM to this machine"
+  else
+    ok "ram" "${mem_gb}GB RAM available"
+  fi
+}
+
+# ============================================================================
+# CHECK: Talos ISO
+# ============================================================================
 check_iso() {
   local iso="$ROOT_DIR/assets/metal-amd64.iso"
   if [[ ! -f "$iso" ]]; then
-    warn "Talos ISO not found at: $iso"
-    warn "Place it there or adjust your scripts to the actual location."
-    fail "missing Talos ISO"
+    fail "iso" "Talos ISO not found at: $iso" \
+      "Download: curl -L -o $iso https://github.com/siderolabs/talos/releases/download/v1.9.0/metal-amd64.iso"
+    return
   fi
-  ok "Talos ISO present: $iso"
+
+  local size_mb
+  size_mb="$(du -m "$iso" 2>/dev/null | cut -f1)"
+  if [[ -n "$size_mb" ]] && [[ $size_mb -lt 50 ]]; then
+    warn "iso" "Talos ISO seems too small (${size_mb}MB) - might be corrupted" \
+      "Re-download the ISO"
+  else
+    ok "iso" "Talos ISO present (${size_mb:-?}MB)"
+  fi
 }
 
+# ============================================================================
+# CHECK: Profile Validation
+# ============================================================================
 validate_profile() {
   local pdir="$ROOT_DIR/profiles/$PROFILE"
-  [[ -d "$pdir" ]] || fail "Profile dir not found: $pdir"
 
-  [[ -f "$pdir/vars.env" ]] || fail "Missing: $pdir/vars.env"
-  [[ -f "$pdir/nodes.csv" ]] || fail "Missing: $pdir/nodes.csv"
-  ok "profile files exist: $PROFILE"
+  if [[ ! -d "$pdir" ]]; then
+    fail "profile" "Profile directory not found: $pdir" \
+      "Create profile with: mkdir -p $pdir && cp profiles/single-node/* $pdir/"
+    return
+  fi
 
-  # basic csv sanity: name,role,ip,mac at least (ignore comments/blank)
+  if [[ ! -f "$pdir/vars.env" ]]; then
+    fail "profile-vars" "Missing: $pdir/vars.env" \
+      "Copy from template: cp profiles/single-node/vars.env $pdir/"
+    return
+  fi
+  ok "profile-vars" "vars.env exists"
+
+  if [[ ! -f "$pdir/nodes.csv" ]]; then
+    fail "profile-nodes" "Missing: $pdir/nodes.csv" \
+      "Copy from template: cp profiles/single-node/nodes.csv $pdir/"
+    return
+  fi
+
+  # CSV format check
   local bad
   bad="$(awk -F',' '
     /^[[:space:]]*#/ {next}
     /^[[:space:]]*$/ {next}
     NF < 4 {print NR ":" $0}
   ' "$pdir/nodes.csv")" || true
-  [[ -z "$bad" ]] || fail "nodes.csv has malformed lines:\n$bad"
 
-  # uniqueness checks
+  if [[ -n "$bad" ]]; then
+    fail "profile-csv" "nodes.csv has malformed lines: $bad" \
+      "Each line needs: name,role,ip,mac,disk_gb,ram_mb,vcpus"
+    return
+  fi
+
+  # Uniqueness checks
   local dups
   dups="$(awk -F',' '
     /^[[:space:]]*#/ {next}
     /^[[:space:]]*$/ {next}
     {gsub(/[[:space:]]+/, "", $0)}
-    {name[$1]++; role[$2]++; ip[$3]++; mac[$4]++}
+    {name[$1]++; ip[$3]++; mac[$4]++}
     END {
-      for (k in name) if (name[k] > 1) print "dup name: " k
-      for (k in ip)   if (ip[k] > 1)   print "dup ip: " k
-      for (k in mac)  if (mac[k] > 1)  print "dup mac: " k
+      for (k in name) if (name[k] > 1) print "duplicate name: " k
+      for (k in ip)   if (ip[k] > 1)   print "duplicate ip: " k
+      for (k in mac)  if (mac[k] > 1)  print "duplicate mac: " k
     }
   ' "$pdir/nodes.csv")" || true
-  [[ -z "$dups" ]] || fail "nodes.csv duplicates found:\n$dups"
-  ok "nodes.csv looks sane (format + uniqueness)"
+
+  if [[ -n "$dups" ]]; then
+    fail "profile-csv" "nodes.csv has duplicates: $dups" \
+      "Ensure each name, IP, and MAC is unique"
+    return
+  fi
+
+  ok "profile-nodes" "nodes.csv valid (format + uniqueness)"
 }
 
+# ============================================================================
+# CHECK: Kubernetes Access
+# ============================================================================
 check_k8s_access() {
-  [[ "$CHECK_K8S" -eq 1 ]] || { ok "skipping k8s checks (--no-k8s)"; return; }
-  if kubectl get nodes >/dev/null 2>&1; then
-    ok "kubectl can reach cluster"
+  if [[ "$CHECK_K8S" -eq 0 ]]; then
+    ok "k8s" "Skipped (--no-k8s)"
+    return
+  fi
+
+  # Try to find kubeconfig
+  local kubeconfig=""
+  if [[ -n "${KUBECONFIG:-}" ]] && [[ -f "$KUBECONFIG" ]]; then
+    kubeconfig="$KUBECONFIG"
+  elif [[ -n "$PROFILE" ]]; then
+    local profile_kc="$ROOT_DIR/profiles/$PROFILE/talos/kubeconfig"
+    [[ -f "$profile_kc" ]] && kubeconfig="$profile_kc"
+  fi
+
+  if [[ -z "$kubeconfig" ]]; then
+    warn "k8s" "No kubeconfig found (OK before bootstrap)" \
+      "Run: sudo ./scripts/lab.sh $PROFILE provision"
+    return
+  fi
+
+  if kubectl --kubeconfig "$kubeconfig" get nodes >/dev/null 2>&1; then
+    local node_count
+    node_count="$(kubectl --kubeconfig "$kubeconfig" get nodes --no-headers 2>/dev/null | wc -l)"
+    ok "k8s" "Cluster reachable ($node_count node(s))"
   else
-    warn "kubectl cannot reach cluster (this is OK before bootstrap)."
+    warn "k8s" "kubectl cannot reach cluster" \
+      "Check if VMs are running: sudo ./scripts/lab.sh $PROFILE status"
   fi
 }
 
-log "== DOCTOR =="
-check_tools
-check_kvm
-check_libvirt
-check_iso
-if [[ -n "$PROFILE" ]]; then
-  validate_profile
-fi
-check_k8s_access
-ok "doctor completed"
+# ============================================================================
+# MAIN
+# ============================================================================
+output_json() {
+  local status="ok"
+  [[ $DOCTOR_FAILED -eq 1 ]] && status="failed"
+
+  echo "{"
+  echo "  \"status\": \"$status\","
+  echo "  \"profile\": \"${PROFILE:-null}\","
+  echo "  \"checks\": ["
+  local first=1
+  for check in "${JSON_CHECKS[@]}"; do
+    [[ $first -eq 0 ]] && echo ","
+    echo -n "    $check"
+    first=0
+  done
+  echo ""
+  echo "  ]"
+  echo "}"
+}
+
+main() {
+  [[ "$OUTPUT_JSON" -eq 0 ]] && log "== DOCTOR =="
+
+  check_kvm
+  check_libvirt
+  check_tools
+  check_talosctl
+  check_kubectl
+  check_diskspace
+  check_resources
+  check_iso
+
+  if [[ -n "$PROFILE" ]]; then
+    validate_profile
+  fi
+
+  check_k8s_access
+
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    output_json
+  else
+    echo ""
+    if [[ $DOCTOR_FAILED -eq 1 ]]; then
+      echo "❌ Doctor found issues. Fix them and run again."
+      exit 1
+    else
+      echo "✅ All checks passed!"
+    fi
+  fi
+}
+
+main

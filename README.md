@@ -654,11 +654,18 @@ nix develop -c ./scripts/fmt
 - If you change scripts: run `fmt` + `lint` before you commit.
 - If a lab fails: run `doctor` first — it often reveals environment/network issues quickly.
 
-## 10. Monitoring stack (Prometheus + Grafana)
+## 10. Monitoring and logging stack
 
-The lab includes a simple observability stack with Prometheus and Grafana for learning debugging and monitoring.
+The lab includes a complete observability stack for learning debugging and monitoring:
+
+- **Prometheus** - metrics collection
+- **Loki** - log aggregation
+- **Promtail** - log collector (runs on all nodes)
+- **Grafana** - visualization (pre-configured with both datasources)
 
 ### Deploy monitoring
+
+Monitoring is deployed automatically with `lab1 all`. To deploy separately:
 
 ```bash
 sudo ./scripts/lab lab1 monitoring
@@ -667,8 +674,9 @@ sudo ./scripts/lab lab1 monitoring
 This will:
 - Install `local-path-provisioner` for storage
 - Deploy Prometheus (metrics collection, 7-day retention)
-- Deploy Grafana (visualization, pre-configured with Prometheus datasource)
-- Configure the NixOS-host proxy for Grafana on port 3000
+- Deploy Loki (log aggregation)
+- Deploy Promtail (log collector DaemonSet)
+- Deploy Grafana (visualization, pre-configured with Prometheus and Loki datasources)
 
 ### Access Grafana
 
@@ -730,11 +738,37 @@ annotations:
   prometheus.io/port: "8000"
 ```
 
+### Viewing logs with Loki
+
+All pod logs are automatically collected by Promtail and stored in Loki. To view logs:
+
+1. Open Grafana: `https://grafana.lab.local`
+2. Go to **Explore** (compass icon in sidebar)
+3. Select **Loki** as datasource (dropdown at top)
+4. Run a query, for example:
+   - `{namespace="demo"}` - all logs from demo namespace
+   - `{app="demo-backend"}` - logs from backend pods
+   - `{namespace="kube-system"}` - system logs
+
+Example queries:
+
+```logql
+# All logs from demo namespace
+{namespace="demo"}
+
+# Backend errors only
+{app="demo-backend"} |= "error"
+
+# Logs from last 5 minutes with rate
+rate({namespace="demo"}[5m])
+```
+
 ### Notes
 
-- Prometheus uses 5Gi storage, Grafana uses 1Gi
-- Both require `local-path-provisioner` (installed automatically)
-- Grafana NodePort is 30300, proxied to port 3000 on the NixOS-host
+- Prometheus uses 5Gi storage, Loki uses 5Gi, Grafana uses 1Gi
+- All require `local-path-provisioner` (installed automatically)
+- Promtail runs as DaemonSet on all nodes (including control-plane)
+- Logs are retained for 7 days by default
 
 
 ## 11. Ingress with Traefik (TLS)
@@ -764,15 +798,39 @@ Add to `/etc/hosts` on the machine where you run your browser:
 
 ### Access services via SSH tunnel
 
-```bash
-# From laptop via jump host (port 443 for HTTPS)
-ssh -L 443:127.0.0.1:443 -J user@ubuntu-host gunstein@nixos-host
+There are two options for tunneling HTTPS traffic to your laptop:
 
-# Then open in browser
+**Option 1: Forward port 443 (requires sudo)**
+
+```bash
+# Requires sudo because port 443 is privileged
+sudo ssh -L 443:127.0.0.1:443 -J user@ubuntu-host gunstein@nixos-host
+
+# Add to /etc/hosts on laptop
+127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local
+
+# Open in browser
 https://demo.lab.local
 https://grafana.lab.local
 https://prometheus.lab.local
 ```
+
+**Option 2: Forward to non-privileged port (no sudo needed)**
+
+```bash
+# Forward to port 8443 instead (no sudo required)
+ssh -L 8443:127.0.0.1:443 -J user@ubuntu-host gunstein@nixos-host
+
+# Add to /etc/hosts on laptop
+127.0.0.1 demo.lab.local grafana.lab.local prometheus.lab.local
+
+# Open in browser (note the :8443 port)
+https://demo.lab.local:8443
+https://grafana.lab.local:8443
+https://prometheus.lab.local:8443
+```
+
+**Important:** The `/etc/hosts` entry is required because Traefik uses Host-header based routing. Without it, you'll get a 404 error.
 
 ### Trust the CA certificate
 
