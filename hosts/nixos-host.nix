@@ -109,35 +109,8 @@ in
     enableDelete = true;
   };
 
-  # Firewall: allow access to Traefik ingress (443), container registry (5000), and Grafana (3000)
-  networking.firewall.allowedTCPPorts = [ 443 5000 3000 ];
-
-  # Grafana proxy: forward NixOS-host :3000 to Grafana NodePort in the lab.
-  # The lab command `monitoring` writes /etc/talos-grafana-proxy.env and restarts this service.
-  systemd.services.talos-grafana-proxy = let
-    proxyScript = pkgs.writeShellScript "talos-grafana-proxy" ''
-      set -euo pipefail
-      source /etc/talos-grafana-proxy.env
-      exec ${pkgs.socat}/bin/socat \
-        "TCP-LISTEN:''${LISTEN_PORT},fork,reuseaddr" \
-        "TCP:''${TARGET_IP}:''${TARGET_PORT}"
-    '';
-  in {
-    description = "Talos lab: forward NixOS-host :3000 to Grafana NodePort";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    unitConfig = {
-      ConditionPathExists = "/etc/talos-grafana-proxy.env";
-    };
-
-    serviceConfig = {
-      ExecStart = proxyScript;
-      Restart = "always";
-      RestartSec = 2;
-    };
-  };
+  # Firewall: allow access to Traefik ingress (443) and container registry (5000)
+  networking.firewall.allowedTCPPorts = [ 443 5000 ];
 
   # Ingress proxy: forward NixOS-host :443 to Traefik TLS NodePort in the lab.
   # The lab command `ingress` writes /etc/talos-ingress-proxy.env and restarts this service.

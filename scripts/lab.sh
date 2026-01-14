@@ -597,29 +597,19 @@ cmd_monitoring() {
     die "grafana rollout timed out"
   fi
 
-  # If Traefik is installed, create Ingress resources
+  # Configure Ingress for monitoring (requires Traefik)
   if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
     log "Traefik detected - configuring Ingress for monitoring"
     kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/grafana-ingress.yaml" >/dev/null
     kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/prometheus-ingress.yaml" >/dev/null
-    log "OK. Monitoring stack deployed!"
-    log ""
-    log "Grafana: https://grafana.lab.local (admin/admin)"
-    log "Prometheus: https://prometheus.lab.local"
   else
-    # Legacy: configure NixOS-host forwarder for NodePort
-    log "Configure NixOS-host forwarder for Grafana (3000 -> ${cp_ip}:30300)"
-    cat > /etc/talos-grafana-proxy.env <<EOF
-LISTEN_PORT=3000
-TARGET_IP=${cp_ip}
-TARGET_PORT=30300
-EOF
-    systemctl restart talos-grafana-proxy.service
-    log "OK. Monitoring stack deployed!"
-    log ""
-    log "Grafana: http://127.0.0.1:3000 (admin/admin)"
-    log "Prometheus (port-forward): kubectl -n monitoring port-forward svc/prometheus 9090:9090"
+    log_warn "Traefik not installed - run 'lab <profile> ingress' first for HTTPS access"
   fi
+
+  log "OK. Monitoring stack deployed!"
+  log ""
+  log "Grafana: https://grafana.lab.local (admin/admin)"
+  log "Prometheus: https://prometheus.lab.local"
 }
 
 
