@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/lib.sh"
+source "${SCRIPT_DIR}/common.sh"
 
 CERT_DIR="${1:-/etc/nixos/talos-host/certs}"
 DOMAIN="lab.local"

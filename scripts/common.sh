@@ -24,17 +24,62 @@ if [[ -z "${__COMMON_ERR_TRAP_INSTALLED:-}" ]]; then
   __COMMON_ERR_TRAP_INSTALLED=1
 fi
 
+# ============================================================================
+# Logging
+# ============================================================================
 
-# Logging configuration
 TALOS_LAB_VERBOSE="${TALOS_LAB_VERBOSE:-0}"
 TALOS_LAB_DEBUG="${TALOS_LAB_DEBUG:-0}"
 TALOS_LAB_LOG_DIR="${TALOS_LAB_LOG_DIR:-/var/log/talos-vm-lab}"
 TALOS_LAB_LOG_FILE=""
+TALOS_LAB_STEP=""
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
-log_warn() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARN: $*" >&2; }
-log_error() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: $*" >&2; }
-log_debug() { [[ "$TALOS_LAB_DEBUG" == "1" ]] && echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DEBUG: $*"; return 0; }
+# Colors (disabled if not a terminal)
+if [[ -t 1 ]]; then
+  _RED='\033[0;31m'
+  _YELLOW='\033[0;33m'
+  _GREEN='\033[0;32m'
+  _BLUE='\033[0;34m'
+  _RESET='\033[0m'
+else
+  _RED='' _YELLOW='' _GREEN='' _BLUE='' _RESET=''
+fi
+
+# Internal log function with color support
+_log() {
+  local level="$1" color="$2"
+  shift 2
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local step_prefix=""
+  [[ -n "$TALOS_LAB_STEP" ]] && step_prefix="[${TALOS_LAB_STEP}] "
+  local msg="${step_prefix}$*"
+
+  # Print to terminal with color
+  printf '%b[%s] [%-5s] %s%b\n' "$color" "$ts" "$level" "$msg" "$_RESET"
+
+  # Append to log file if configured
+  if [[ -n "$TALOS_LAB_LOG_FILE" && -w "$(dirname "$TALOS_LAB_LOG_FILE")" ]]; then
+    printf '[%s] [%-5s] %s\n' "$ts" "$level" "$msg" >> "$TALOS_LAB_LOG_FILE"
+  fi
+}
+
+log()       { _log "INFO"  "$_GREEN"  "$@"; }
+log_info()  { _log "INFO"  "$_GREEN"  "$@"; }
+log_warn()  { _log "WARN"  "$_YELLOW" "$@" >&2; }
+log_error() { _log "ERROR" "$_RED"    "$@" >&2; }
+log_debug() { [[ "$TALOS_LAB_DEBUG" == "1" ]] && _log "DEBUG" "$_BLUE" "$@"; return 0; }
+
+# Set current step name for log context
+log_step() {
+  TALOS_LAB_STEP="$1"
+  log_info "Starting: $1"
+}
+
+log_step_done() {
+  log_info "Done: ${TALOS_LAB_STEP:-$1}"
+  TALOS_LAB_STEP=""
+}
 
 log_init() {
   local profile="${1:-unknown}"
@@ -48,6 +93,9 @@ log_init() {
       ts="$(date +%Y%m%d-%H%M%S)"
       TALOS_LAB_LOG_FILE="${log_dir}/${ts}-${cmd}.log"
       touch "$TALOS_LAB_LOG_FILE" 2>/dev/null || TALOS_LAB_LOG_FILE=""
+      if [[ -n "$TALOS_LAB_LOG_FILE" ]]; then
+        log_info "Log file: $TALOS_LAB_LOG_FILE"
+      fi
     fi
   fi
 
@@ -56,10 +104,38 @@ log_init() {
   fi
 }
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+# Print next steps on error
+log_next_steps() {
+  log_error "Something went wrong. Try these diagnostic steps:"
+  echo "  1. Check VM status:        sudo ./scripts/lab <profile> status" >&2
+  echo "  2. Check libvirt VMs:      sudo virsh list --all" >&2
+  echo "  3. Check kubernetes pods:  kubectl get pods -A" >&2
+  echo "  4. View this run's log:    ${TALOS_LAB_LOG_FILE:-'(no log file)'}" >&2
+  echo "  5. Run doctor:             sudo ./scripts/doctor <profile>" >&2
+}
+
+# ============================================================================
+# Core utilities
+# ============================================================================
+
+# Compute repository root directory
+root_dir() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  (cd "$here/.." && pwd)
+}
+
+ROOT="$(root_dir)"
+
+die() {
+  log_error "$*"
+  log_next_steps
+  exit 1
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
-# Safe root escalation:
+# Safe root escalation (alias for require_root)
 # - no sudo -E
 # - no "bash $0" (run script directly; rely on shebang)
 # - minimal env (env -i)
@@ -83,14 +159,10 @@ require_root() {
   fi
 }
 
-root_dir() {
-  local here
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  (cd "$here/.." && pwd)
-}
+# Alias for require_root (backward compatibility)
+as_root() { require_root "$@"; }
 
 PROFILE=""
-ROOT=""
 PROFILE_DIR=""
 VARS_ENV=""
 NODES_CSV=""

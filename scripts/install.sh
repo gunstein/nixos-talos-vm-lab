@@ -22,6 +22,10 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Source version pins
+# shellcheck source=../versions.env
+source "${REPO_ROOT}/versions.env"
+
 # --- Cleanup old NixOS generations to free disk space ---
 cleanup_nix() {
   local avail_gb
@@ -108,7 +112,7 @@ else
     log "Using existing ISO: ${ISO_DST}"
   else
     log "WARN: ISO not found. Download with:"
-    log "  curl -L -o ${ISO_REPO} https://github.com/siderolabs/talos/releases/download/v1.9.0/metal-amd64.iso"
+    log "  curl -L -o ${ISO_REPO} https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/metal-amd64.iso"
   fi
 fi
 
