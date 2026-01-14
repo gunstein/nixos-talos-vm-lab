@@ -9,33 +9,11 @@ if [[ "$ROOT" != "/etc/nixos/talos-host" ]]; then
   exit 1
 fi
 
-usage() {
-  cat <<EOF
-Usage:
-  sudo ./scripts/lab <lab> <cmd>
-
-Commands:
-  status
-  up
-  provision
-  verify
-  all
-  wipe
-  net-recreate   (explicit destructive, only when needed)
-  demo           (build, deploy and expose the demo: frontend + backend)
-  demo-db        (demo with CloudNativePG database)
-  monitoring     (deploy Prometheus + Grafana observability stack)
-  ingress        (deploy Traefik Ingress Controller)
-
-Examples:
-  cd /etc/nixos/talos-host
-  sudo ./scripts/lab lab1 wipe
-  sudo ./scripts/lab lab1 all
-EOF
-}
-
-lab="${1:-}"; cmd="${2:-}"
-[[ -n "$lab" && -n "$cmd" ]] || { usage; exit 1; }
+# Pass-through wrapper: all argument parsing is done in lab.sh
+# Just ensure we have at least some arguments
+if [[ $# -eq 0 ]]; then
+  exec "${ROOT}/scripts/lab.sh" --help
+fi
 
 as_root "$@"
-exec "${ROOT}/scripts/lab.sh" "$lab" "$cmd"
+exec "${ROOT}/scripts/lab.sh" "$@"
