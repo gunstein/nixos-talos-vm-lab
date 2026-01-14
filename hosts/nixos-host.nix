@@ -109,41 +109,8 @@ in
     enableDelete = true;
   };
 
-  # Allow Ubuntu host to reach the forwarding port inside this VM
-  # and allow Talos nodes to reach the local registry.
-  # 443 = Traefik ingress (TLS), 8080 = demo frontend (legacy), 5000 = container registry, 3000 = Grafana (legacy)
-  networking.firewall.allowedTCPPorts = [ 443 8080 5000 3000 ];
-
-  # Optional helper: expose the current lab's demo frontend via this VM on :8080.
-  # The lab command `demo-frontend` writes /etc/talos-frontend-proxy.env and restarts this service.
-  #
-  # NOTE: systemd does NOT expand environment variables in ExecStart unless a shell is involved.
-  # We therefore use a tiny wrapper script that sources the env-file and then execs socat.
-  systemd.services.talos-frontend-proxy = let
-    proxyScript = pkgs.writeShellScript "talos-frontend-proxy" ''
-      set -euo pipefail
-      source /etc/talos-frontend-proxy.env
-      exec ${pkgs.socat}/bin/socat \
-        "TCP-LISTEN:''${LISTEN_PORT},fork,reuseaddr" \
-        "TCP:''${TARGET_IP}:''${TARGET_PORT}"
-    '';
-  in {
-    description = "Talos lab: forward NixOS-host :8080 to current lab frontend NodePort";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    unitConfig = {
-      # Don't start until the lab has been created + demo-frontend has been configured.
-      ConditionPathExists = "/etc/talos-frontend-proxy.env";
-    };
-
-    serviceConfig = {
-      ExecStart = proxyScript;
-      Restart = "always";
-      RestartSec = 2;
-    };
-  };
+  # Firewall: allow access to Traefik ingress (443), container registry (5000), and Grafana (3000)
+  networking.firewall.allowedTCPPorts = [ 443 5000 3000 ];
 
   # Grafana proxy: forward NixOS-host :3000 to Grafana NodePort in the lab.
   # The lab command `monitoring` writes /etc/talos-grafana-proxy.env and restarts this service.
