@@ -818,18 +818,15 @@ certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Talos Lab CA" -i ca.crt
 # Port-forward to access dashboard
 kubectl -n traefik-system port-forward svc/traefik 8080:8080
 # Then open http://127.0.0.1:8080
-
-# Or access via NodePort
-http://<node-ip>:30088
 ```
 
 ### Architecture
 
 ```
-Browser → NixOS-host:443 → Traefik (NodePort 30443)
-                                 ├── demo.lab.local      → demo-frontend
-                                 ├── grafana.lab.local   → Grafana
-                                 └── prometheus.lab.local → Prometheus
+Browser → NixOS-host:443 → socat proxy → Traefik (hostNetwork :443)
+                                              ├── demo.lab.local      → demo-frontend
+                                              ├── grafana.lab.local   → Grafana
+                                              └── prometheus.lab.local → Prometheus
 ```
 
 ### Manual Ingress command

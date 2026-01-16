@@ -615,12 +615,6 @@ cmd_monitoring() {
 
 # Helper: install Traefik if not already running
 install_traefik() {
-  # Check if Traefik is already running
-  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
-    log "Traefik already installed"
-    return 0
-  fi
-
   # Generate CA and certificates if not present
   local cert_dir="${ROOT}/certs"
   if [[ ! -f "${cert_dir}/ca.crt" ]]; then
@@ -628,24 +622,24 @@ install_traefik() {
     "${ROOT}/scripts/generate-ca.sh" "${cert_dir}"
   fi
 
-  log "Install Traefik Ingress Controller"
-  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/traefik.yaml" >/dev/null
-
-  # Create TLS secret in traefik-system namespace
-  log "Create TLS secret for Traefik"
-  kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system create secret tls traefik-tls \
-    --cert="${cert_dir}/server.crt" \
-    --key="${cert_dir}/server.key" \
-    --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null
-
-  # Also create in demo and monitoring namespaces (for Ingress resources)
-  for ns in demo monitoring; do
+  # Always ensure TLS secrets exist (idempotent)
+  log "Ensure TLS secrets exist"
+  for ns in traefik-system demo monitoring; do
     kubectl --kubeconfig "$KUBECONFIG_OUT" create namespace "$ns" --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null 2>&1 || true
     kubectl --kubeconfig "$KUBECONFIG_OUT" -n "$ns" create secret tls traefik-tls \
       --cert="${cert_dir}/server.crt" \
       --key="${cert_dir}/server.key" \
       --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f - >/dev/null
   done
+
+  # Check if Traefik is already running
+  if kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system get deploy/traefik >/dev/null 2>&1; then
+    log "Traefik already installed"
+    return 0
+  fi
+
+  log "Install Traefik Ingress Controller"
+  kubectl --kubeconfig "$KUBECONFIG_OUT" apply -f "$ROOT/k8s/addons/traefik.yaml" >/dev/null
 
   log "Wait for Traefik rollout"
   if ! kubectl --kubeconfig "$KUBECONFIG_OUT" -n traefik-system rollout status deploy/traefik --timeout=3m; then
@@ -664,11 +658,11 @@ install_traefik() {
 configure_ingress_proxy() {
   local cp_ip="$1"
 
-  log "Configure NixOS-host forwarder (443 -> ${cp_ip}:30443)"
+  log "Configure NixOS-host forwarder (443 -> ${cp_ip}:443)"
   cat > /etc/talos-ingress-proxy.env <<EOF
 LISTEN_PORT=443
 TARGET_IP=${cp_ip}
-TARGET_PORT=30443
+TARGET_PORT=443
 EOF
 
   systemctl restart talos-ingress-proxy.service || log "WARN: talos-ingress-proxy.service not found - run nixos-rebuild switch"

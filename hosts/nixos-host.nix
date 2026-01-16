@@ -112,7 +112,7 @@ in
   # Firewall: allow access to Traefik ingress (443) and container registry (5000)
   networking.firewall.allowedTCPPorts = [ 443 5000 ];
 
-  # Ingress proxy: forward NixOS-host :443 to Traefik TLS NodePort in the lab.
+  # Ingress proxy: forward NixOS-host :443 to Traefik in the lab (hostNetwork mode).
   # The lab command `ingress` writes /etc/talos-ingress-proxy.env and restarts this service.
   systemd.services.talos-ingress-proxy = let
     proxyScript = pkgs.writeShellScript "talos-ingress-proxy" ''
@@ -123,7 +123,7 @@ in
         "TCP:''${TARGET_IP}:''${TARGET_PORT}"
     '';
   in {
-    description = "Talos lab: forward NixOS-host :443 to Traefik Ingress TLS NodePort";
+    description = "Talos lab: forward NixOS-host :443 to Traefik Ingress";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];

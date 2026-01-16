@@ -4,7 +4,7 @@ What you get:
 - Namespace `demo`
 - A tiny `nginx` **frontend** Deployment serving a static HTML page
 - A tiny **backend** (Go HTTP server) reachable as `/api/hello` (proxied by the frontend)
-- A `NodePort` Service on port `30080`
+- Traefik Ingress routing via `demo.lab.local`
 
 How it works in this repo:
 - The backend image is built on the **NixOS-host VM** using Podman and pushed to a small **local registry** running on the NixOS-host (`services.dockerRegistry`, port `5000`).
@@ -17,14 +17,16 @@ Notes:
   The `demo` command automatically removes that taint so the demo can schedule.
 - Pods run as non-root (compatible with Pod Security "restricted").
 
-Inside the Talos lab network, the demo is reachable at:
+Access the demo via Traefik Ingress:
 
-- `http://<any-node-ip>:30080/`
-- `http://<any-node-ip>:30080/api/hello`
+- `https://demo.lab.local/`
+- `https://demo.lab.local/api/hello`
 
-In this repository we typically forward it outward:
+Architecture:
 
-LAN → Ubuntu → NixOS-host VM (8080) → Talos node (30080)
+```
+Browser → NixOS-host:443 → socat proxy → Traefik (hostNetwork) → demo-frontend
+```
 
 
 ## Demo with database (`demo-db`)
