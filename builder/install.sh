@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install script for builder-VM
+# Install script for builder-VM (nixos-control)
 # Sets up NixOS configuration and Python environment
 set -euo pipefail
 
@@ -64,25 +64,66 @@ LOCALBIN="${ORIG_HOME}/.local/bin"
 sudo -u "$ORIG_USER" mkdir -p "$LOCALBIN"
 ln -sf "$VENV_DIR/bin/labctl" "$LOCALBIN/labctl"
 
+# Create config directory and file
+CONFIG_DIR="${ORIG_HOME}/.config/labctl"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+
+sudo -u "$ORIG_USER" mkdir -p "$CONFIG_DIR"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    log "Creating config file at $CONFIG_FILE"
+    cat > "$CONFIG_FILE" << 'EOF'
+# labctl configuration
+# See: labctl config
+
+[lab]
+profile = "lab1"
+local_repo = "~/nixos-talos-vm-lab"
+
+[nixos-host]
+# Set this to the IP address of nixos-host
+host = "nixos-host"
+user = "gunstein"
+# port = 22
+# ssh_key = "~/.ssh/id_rsa"
+
+[tunnel]
+local_port = 8443
+remote_port = 443
+
+# [github]
+# repo = "gunstein/nixos-talos-vm-lab"
+# branch = "main"
+EOF
+    chown "$ORIG_USER:$(id -gn "$ORIG_USER")" "$CONFIG_FILE"
+    log "Edit $CONFIG_FILE to set nixos-host IP address"
+else
+    log "Config file already exists: $CONFIG_FILE"
+fi
+
+# Ensure PATH includes ~/.local/bin
+BASHRC="${ORIG_HOME}/.bashrc"
+if ! grep -q '\.local/bin' "$BASHRC" 2>/dev/null; then
+    log "Adding ~/.local/bin to PATH in .bashrc"
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASHRC"
+fi
+
 log ""
 log "Installation complete!"
 log ""
 log "Next steps:"
-log "  1. Ensure SSH access to nixos-host:"
+log "  1. Edit config file with nixos-host IP:"
+log "     nano ~/.config/labctl/config.toml"
+log ""
+log "  2. Ensure SSH access to nixos-host:"
 log "     ssh-copy-id gunstein@<nixos-host-ip>"
 log ""
-log "  2. Set environment variables (add to ~/.bashrc):"
-log "     export NIXOS_HOST=<nixos-host-ip>"
-log "     export NIXOS_USER=gunstein"
-log "     export LAB_PROFILE=lab1"
-log "     export PATH=\"\$HOME/.local/bin:\$PATH\""
+log "  3. Reload shell (or run: source ~/.bashrc)"
 log ""
-log "  3. Test connection:"
+log "  4. Test connection:"
+log "     labctl config       # Show current config"
 log "     labctl provision status"
 log ""
-log "  4. Deploy and provision lab:"
-log "     labctl deploy --local ~/nixos-talos-vm-lab"
+log "  5. Deploy and provision lab:"
+log "     labctl deploy"
 log "     labctl provision all"
-log ""
-log "  5. Run tests:"
-log "     labctl test --smoke"

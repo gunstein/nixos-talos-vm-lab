@@ -18,41 +18,89 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def confirm(message: str) -> bool:
+    """Ask user for confirmation."""
+    try:
+        response = input(f"{message} [y/N] ").strip().lower()
+        return response in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
 def cmd_deploy(args: argparse.Namespace, lab_config: LabConfig) -> int:
     """Deploy repository to nixos-host."""
-    if args.local:
-        local_path = Path(args.local)
-        repo_config = RepoConfig.from_versions_env(local_path)
-    else:
-        repo_config = RepoConfig()
+    # Determine local repo path
+    local_path = lab_config.local_repo
+    if not local_path.exists():
+        logger.error(f"Local repo not found: {local_path}")
+        logger.error("Set local_repo in ~/.config/labctl/config.toml")
+        return 1
+
+    repo_config = RepoConfig.load(local_path)
+
+    # Determine what to do
+    install_only = args.install
+    wipe_only = args.wipe
+    provision_only = args.provision
+
+    # Default: full deploy (wipe + install + provision)
+    do_wipe = not install_only and not provision_only
+    do_install = not wipe_only and not provision_only
+    do_provision = not install_only and not wipe_only
+
+    # Handle explicit flags
+    if wipe_only:
+        do_wipe = True
+        do_install = False
+        do_provision = False
+    if install_only:
+        do_wipe = False
+        do_install = True
+        do_provision = False
+    if provision_only:
+        do_wipe = False
+        do_install = False
+        do_provision = True
+
+    # Confirmation for destructive operations
+    if do_wipe and not args.yes:
+        if not confirm("This will destroy the existing lab. Continue?"):
+            logger.info("Aborted")
+            return 0
 
     with SSHClient(lab_config) as ssh:
-        deployer = Deployer(lab_config, repo_config, ssh)
+        if do_wipe:
+            logger.info("Wiping existing lab...")
+            provisioner = Provisioner(lab_config, ssh)
+            provisioner.wipe()
 
-        if args.local:
-            deployer.full_deploy(Path(args.local))
-        else:
-            deployer.full_deploy()
+        if do_install:
+            logger.info("Deploying repo and running install.sh...")
+            deployer = Deployer(lab_config, repo_config, ssh)
+            deployer.full_deploy(local_path)
+
+        if do_provision:
+            logger.info("Provisioning lab...")
+            provisioner = Provisioner(lab_config, ssh)
+            provisioner.all()
 
     return 0
 
 
-def cmd_provision(args: argparse.Namespace, lab_config: LabConfig) -> int:
-    """Provision the lab."""
+def cmd_status(args: argparse.Namespace, lab_config: LabConfig) -> int:
+    """Show lab status."""
     with SSHClient(lab_config) as ssh:
         provisioner = Provisioner(lab_config, ssh)
+        print(provisioner.status())
+    return 0
 
-        if args.command == "all":
-            provisioner.all()
-        elif args.command == "up":
-            provisioner.up()
-        elif args.command == "wipe":
-            provisioner.wipe()
-        elif args.command == "status":
-            print(provisioner.status())
-        elif args.command == "doctor":
-            print(provisioner.doctor())
 
+def cmd_doctor(args: argparse.Namespace, lab_config: LabConfig) -> int:
+    """Run health checks."""
+    with SSHClient(lab_config) as ssh:
+        provisioner = Provisioner(lab_config, ssh)
+        print(provisioner.doctor())
     return 0
 
 
@@ -81,23 +129,48 @@ def cmd_test(args: argparse.Namespace, lab_config: LabConfig) -> int:
     return result.returncode
 
 
+def cmd_config(args: argparse.Namespace, lab_config: LabConfig) -> int:
+    """Show current configuration."""
+    from labctl.config import _find_config_file
+
+    config_file = _find_config_file()
+    print(f"Config file: {config_file or '(none found)'}")
+    print()
+    print("[lab]")
+    print(f"  profile = {lab_config.profile}")
+    print(f"  local_repo = {lab_config.local_repo}")
+    print()
+    print("[nixos-host]")
+    print(f"  host = {lab_config.nixos_host}")
+    print(f"  user = {lab_config.nixos_user}")
+    print(f"  port = {lab_config.nixos_port}")
+    if lab_config.ssh_key_path:
+        print(f"  ssh_key = {lab_config.ssh_key_path}")
+    print()
+    print("[tunnel]")
+    print(f"  local_port = {lab_config.tunnel_local_port}")
+    print(f"  remote_port = {lab_config.tunnel_remote_port}")
+
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="Talos lab provisioning and testing tool",
-        epilog="Environment variables: NIXOS_HOST, NIXOS_USER, LAB_PROFILE, TUNNEL_PORT, SSH_KEY_PATH",
+        epilog="Config: ~/.config/labctl/config.toml",
     )
     parser.add_argument(
         "--host",
-        help="nixos-host hostname or IP (env: NIXOS_HOST)",
+        help="nixos-host hostname or IP",
     )
     parser.add_argument(
         "--user",
-        help="SSH username (env: NIXOS_USER)",
+        help="SSH username",
     )
     parser.add_argument(
         "--profile",
-        help="Lab profile (env: LAB_PROFILE)",
+        help="Lab profile",
     )
     parser.add_argument(
         "-v",
@@ -109,19 +182,37 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     # deploy command
-    deploy_parser = subparsers.add_parser("deploy", help="Deploy repo to nixos-host")
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Deploy lab (default: wipe + install + provision)",
+    )
     deploy_parser.add_argument(
-        "--local",
-        help="Use local repo path instead of cloning",
+        "--install",
+        action="store_true",
+        help="Only deploy repo and run install.sh (no wipe/provision)",
+    )
+    deploy_parser.add_argument(
+        "--wipe",
+        action="store_true",
+        help="Only wipe the lab (no install/provision)",
+    )
+    deploy_parser.add_argument(
+        "--provision",
+        action="store_true",
+        help="Only provision the lab (no wipe/install)",
+    )
+    deploy_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt",
     )
 
-    # provision command
-    provision_parser = subparsers.add_parser("provision", help="Provision the lab")
-    provision_parser.add_argument(
-        "command",
-        choices=["all", "up", "wipe", "status", "doctor"],
-        help="Lab command to run",
-    )
+    # status command
+    subparsers.add_parser("status", help="Show lab status")
+
+    # doctor command
+    subparsers.add_parser("doctor", help="Run health checks")
 
     # test command
     test_parser = subparsers.add_parser("test", help="Run tests")
@@ -136,13 +227,16 @@ def main() -> int:
         help="Only run tests matching pattern",
     )
 
+    # config command
+    subparsers.add_parser("config", help="Show current configuration")
+
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Build config from env vars, with CLI flags as overrides
-    lab_config = LabConfig.from_env(
+    # Build config from file, env vars, and CLI flags
+    lab_config = LabConfig.load(
         nixos_host=args.host,
         nixos_user=args.user,
         profile=args.profile,
@@ -151,10 +245,14 @@ def main() -> int:
     try:
         if args.action == "deploy":
             return cmd_deploy(args, lab_config)
-        elif args.action == "provision":
-            return cmd_provision(args, lab_config)
+        elif args.action == "status":
+            return cmd_status(args, lab_config)
+        elif args.action == "doctor":
+            return cmd_doctor(args, lab_config)
         elif args.action == "test":
             return cmd_test(args, lab_config)
+        elif args.action == "config":
+            return cmd_config(args, lab_config)
     except Exception as e:
         logger.error(f"Error: {e}")
         if args.verbose:
