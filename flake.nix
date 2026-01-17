@@ -18,6 +18,13 @@
         ];
       };
 
+      nixosConfigurations.builder-vm = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./hosts/builder-vm.nix
+        ];
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           bashInteractive

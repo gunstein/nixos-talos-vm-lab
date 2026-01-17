@@ -1,8 +1,7 @@
 """SSH utilities for connecting to nixos-host."""
 
 import logging
-import socket
-import threading
+import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -68,7 +67,11 @@ class SSHClient:
             logger.info("Disconnected")
 
     def run(self, command: str, timeout: int | None = None) -> CommandResult:
-        """Execute a command on nixos-host."""
+        """Execute a command on nixos-host.
+
+        Note: Reads stdout/stderr before getting exit status to avoid
+        potential deadlock when command produces large output.
+        """
         if self._client is None:
             raise RuntimeError("Not connected")
 
@@ -76,12 +79,18 @@ class SSHClient:
         logger.debug(f"Running: {command}")
 
         stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+
+        # Read all output first to avoid deadlock
+        stdout_data = stdout.read().decode()
+        stderr_data = stderr.read().decode()
+
+        # Now get exit status (safe after reading all output)
         exit_code = stdout.channel.recv_exit_status()
 
         result = CommandResult(
             exit_code=exit_code,
-            stdout=stdout.read().decode(),
-            stderr=stderr.read().decode(),
+            stdout=stdout_data,
+            stderr=stderr_data,
         )
 
         if result.success:
@@ -92,8 +101,11 @@ class SSHClient:
         return result
 
     def run_sudo(self, command: str, timeout: int | None = None) -> CommandResult:
-        """Execute a command with sudo on nixos-host."""
-        return self.run(f"sudo {command}", timeout=timeout)
+        """Execute a command with sudo on nixos-host.
+
+        Uses sudo -n to fail fast if password is required.
+        """
+        return self.run(f"sudo -n {command}", timeout=timeout)
 
     def upload_file(self, local_path: Path, remote_path: Path) -> None:
         """Upload a file via SFTP."""
@@ -149,114 +161,74 @@ class SSHClient:
 
 
 class SSHTunnel:
-    """SSH tunnel for accessing lab services."""
+    """SSH tunnel using system ssh command (more robust than paramiko tunneling)."""
 
     def __init__(
         self,
-        client: SSHClient,
+        config: LabConfig,
         local_port: int,
         remote_port: int,
         remote_host: str = "127.0.0.1",
     ) -> None:
-        self.client = client
+        self.config = config
         self.local_port = local_port
         self.remote_port = remote_port
         self.remote_host = remote_host
-        self._server_socket: socket.socket | None = None
-        self._thread: threading.Thread | None = None
-        self._running = False
+        self._process: subprocess.Popen | None = None
 
     def start(self) -> None:
         """Start the SSH tunnel."""
-        if self.client._client is None:
-            raise RuntimeError("SSH client not connected")
+        ssh_args = [
+            "ssh",
+            "-N",  # No command, just tunnel
+            "-L",
+            f"{self.local_port}:{self.remote_host}:{self.remote_port}",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-p",
+            str(self.config.nixos_port),
+        ]
 
-        self._running = True
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_socket.bind(("127.0.0.1", self.local_port))
-        self._server_socket.listen(5)
-        self._server_socket.settimeout(1.0)
+        if self.config.ssh_key_path:
+            ssh_args.extend(["-i", str(self.config.ssh_key_path)])
 
-        self._thread = threading.Thread(target=self._tunnel_loop, daemon=True)
-        self._thread.start()
+        ssh_args.append(f"{self.config.nixos_user}@{self.config.nixos_host}")
 
         logger.info(
-            f"SSH tunnel started: localhost:{self.local_port} -> {self.remote_host}:{self.remote_port}"
+            f"Starting SSH tunnel: localhost:{self.local_port} -> "
+            f"{self.remote_host}:{self.remote_port}"
         )
+        self._process = subprocess.Popen(
+            ssh_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        # Wait a moment for tunnel to establish
+        time.sleep(1)
+
+        # Check if process is still running
+        if self._process.poll() is not None:
+            stderr = self._process.stderr.read().decode() if self._process.stderr else ""
+            raise RuntimeError(f"SSH tunnel failed to start: {stderr}")
+
+        logger.info("SSH tunnel started")
 
     def stop(self) -> None:
         """Stop the SSH tunnel."""
-        self._running = False
-        if self._server_socket:
-            self._server_socket.close()
-            self._server_socket = None
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            self._thread = None
-        logger.info("SSH tunnel stopped")
-
-    def _tunnel_loop(self) -> None:
-        """Main tunnel loop accepting connections."""
-        transport = self.client._client.get_transport()  # type: ignore
-        if transport is None:
-            return
-
-        while self._running:
+        if self._process:
+            self._process.terminate()
             try:
-                client_socket, addr = self._server_socket.accept()  # type: ignore
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-
-            # Open channel to remote
-            try:
-                channel = transport.open_channel(
-                    "direct-tcpip",
-                    (self.remote_host, self.remote_port),
-                    addr,
-                )
-            except Exception as e:
-                logger.error(f"Failed to open channel: {e}")
-                client_socket.close()
-                continue
-
-            # Forward data in both directions
-            threading.Thread(
-                target=self._forward_data,
-                args=(client_socket, channel),
-                daemon=True,
-            ).start()
-
-    def _forward_data(self, client_socket: socket.socket, channel: paramiko.Channel) -> None:
-        """Forward data between client socket and SSH channel."""
-        try:
-            while True:
-                # Check both directions
-                r_ready = []
-                if channel.recv_ready():
-                    data = channel.recv(4096)
-                    if not data:
-                        break
-                    client_socket.sendall(data)
-
-                try:
-                    client_socket.setblocking(False)
-                    data = client_socket.recv(4096)
-                    client_socket.setblocking(True)
-                    if not data:
-                        break
-                    channel.sendall(data)
-                except BlockingIOError:
-                    client_socket.setblocking(True)
-
-                time.sleep(0.01)
-        except Exception:
-            pass
-        finally:
-            channel.close()
-            client_socket.close()
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
+            self._process = None
+            logger.info("SSH tunnel stopped")
 
     def __enter__(self) -> "SSHTunnel":
         self.start()
@@ -279,12 +251,16 @@ def ssh_connection(config: LabConfig) -> Iterator[SSHClient]:
 
 @contextmanager
 def ssh_tunnel(
-    client: SSHClient,
-    local_port: int,
-    remote_port: int = 443,
+    config: LabConfig,
+    local_port: int | None = None,
+    remote_port: int | None = None,
 ) -> Iterator[SSHTunnel]:
     """Context manager for SSH tunnel."""
-    tunnel = SSHTunnel(client, local_port, remote_port)
+    tunnel = SSHTunnel(
+        config,
+        local_port=local_port or config.tunnel_local_port,
+        remote_port=remote_port or config.tunnel_remote_port,
+    )
     try:
         tunnel.start()
         yield tunnel

@@ -21,32 +21,60 @@ nixos-host
 
 ## Setup
 
-### On builder-vm
+### Option 1: Fresh NixOS builder-vm
 
-1. Install Python 3.11+ and dependencies:
+If setting up a new NixOS VM for builder:
+
+1. Install NixOS (minimal install is fine)
+2. Copy this repo to the VM
+3. Apply the NixOS configuration:
 
 ```bash
-# NixOS
-nix-shell -p python311 python311Packages.pip
+# Copy hardware-configuration.nix to hosts/
+cp /etc/nixos/hardware-configuration.nix ~/nixos-talos-vm-lab/hosts/
 
-# Or using pip
-pip install -e ".[dev]"
+# Build and switch
+sudo nixos-rebuild switch --flake ~/nixos-talos-vm-lab#builder-vm
 ```
 
-2. Configure SSH access to nixos-host:
+4. Run the install script:
+
+```bash
+cd ~/nixos-talos-vm-lab/builder
+./install.sh
+```
+
+### Option 2: Existing system
+
+1. Ensure Python 3.11+ and pip are installed
+2. Run the install script:
+
+```bash
+cd ~/nixos-talos-vm-lab/builder
+./install.sh
+```
+
+### Configure SSH access
 
 ```bash
 # Generate SSH key if needed
 ssh-keygen -t ed25519
 
 # Copy to nixos-host
-ssh-copy-id gunstein@nixos-host
+ssh-copy-id gunstein@<nixos-host-ip>
+
+# Test connection
+ssh gunstein@<nixos-host-ip> "echo 'Connection OK'"
 ```
 
-3. Test connection:
+### Set environment variables
+
+Add to `~/.bashrc`:
 
 ```bash
-ssh gunstein@nixos-host "echo 'Connection OK'"
+export NIXOS_HOST=<nixos-host-ip>
+export NIXOS_USER=gunstein
+export LAB_PROFILE=lab1
 ```
 
 ## Usage
@@ -56,6 +84,10 @@ ssh gunstein@nixos-host "echo 'Connection OK'"
 ```bash
 # Full workflow: clone, download ISO, deploy, install, provision
 labctl deploy
+labctl provision all
+
+# Using local repo (skip git clone)
+labctl deploy --local ~/nixos-talos-vm-lab
 labctl provision all
 
 # Or step by step
@@ -110,12 +142,13 @@ labctl -v provision all
 | `NIXOS_USER` | `gunstein` | SSH username |
 | `LAB_PROFILE` | `lab1` | Lab profile to use |
 | `TUNNEL_PORT` | `8443` | Local port for SSH tunnel |
+| `SSH_KEY_PATH` | (ssh-agent) | Path to SSH private key |
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Install with test and dev dependencies
+pip install -e ".[test,dev]"
 
 # Run linter
 ruff check src/ tests/
@@ -123,7 +156,7 @@ ruff check src/ tests/
 # Run type checker
 mypy src/
 
-# Run tests locally (requires nixos-host access)
+# Run tests (requires nixos-host access)
 pytest -v tests/
 ```
 
@@ -131,6 +164,7 @@ pytest -v tests/
 
 ```
 builder/
+├── install.sh              # Setup script
 ├── pyproject.toml          # Project configuration
 ├── README.md               # This file
 ├── src/
@@ -148,3 +182,10 @@ builder/
     ├── test_smoke.py       # Smoke tests
     └── test_resilience.py  # Resilience tests
 ```
+
+## NixOS configuration
+
+The `hosts/builder-vm.nix` configuration provides:
+- Python 3.11 with pip
+- SSH client, git, rsync, curl
+- Passwordless sudo for wheel group

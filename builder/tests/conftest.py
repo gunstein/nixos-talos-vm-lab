@@ -1,7 +1,5 @@
 """Pytest fixtures for lab testing."""
 
-import os
-
 import pytest
 
 from labctl.client import LabClient
@@ -12,13 +10,8 @@ from labctl.ssh import SSHClient, ssh_tunnel
 
 @pytest.fixture(scope="session")
 def lab_config() -> LabConfig:
-    """Lab configuration from environment or defaults."""
-    return LabConfig(
-        nixos_host=os.environ.get("NIXOS_HOST", "nixos-host"),
-        nixos_user=os.environ.get("NIXOS_USER", "gunstein"),
-        profile=os.environ.get("LAB_PROFILE", "lab1"),
-        tunnel_local_port=int(os.environ.get("TUNNEL_PORT", "8443")),
-    )
+    """Lab configuration from environment variables."""
+    return LabConfig.from_env()
 
 
 @pytest.fixture(scope="session")
@@ -37,13 +30,9 @@ def provisioner(lab_config: LabConfig, ssh_client: SSHClient) -> Provisioner:
 
 
 @pytest.fixture(scope="session")
-def tunnel(lab_config: LabConfig, ssh_client: SSHClient):
+def tunnel(lab_config: LabConfig):
     """SSH tunnel for accessing lab services."""
-    with ssh_tunnel(
-        ssh_client,
-        local_port=lab_config.tunnel_local_port,
-        remote_port=lab_config.tunnel_remote_port,
-    ) as t:
+    with ssh_tunnel(lab_config) as t:
         yield t
 
 

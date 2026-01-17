@@ -18,14 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def cmd_deploy(args: argparse.Namespace) -> int:
+def cmd_deploy(args: argparse.Namespace, lab_config: LabConfig) -> int:
     """Deploy repository to nixos-host."""
-    lab_config = LabConfig(
-        nixos_host=args.host,
-        nixos_user=args.user,
-        profile=args.profile,
-    )
-    repo_config = RepoConfig()
+    if args.local:
+        local_path = Path(args.local)
+        repo_config = RepoConfig.from_versions_env(local_path)
+    else:
+        repo_config = RepoConfig()
 
     with SSHClient(lab_config) as ssh:
         deployer = Deployer(lab_config, repo_config, ssh)
@@ -38,14 +37,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_provision(args: argparse.Namespace) -> int:
+def cmd_provision(args: argparse.Namespace, lab_config: LabConfig) -> int:
     """Provision the lab."""
-    lab_config = LabConfig(
-        nixos_host=args.host,
-        nixos_user=args.user,
-        profile=args.profile,
-    )
-
     with SSHClient(lab_config) as ssh:
         provisioner = Provisioner(lab_config, ssh)
 
@@ -63,9 +56,17 @@ def cmd_provision(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_test(args: argparse.Namespace) -> int:
+def cmd_test(args: argparse.Namespace, lab_config: LabConfig) -> int:
     """Run tests against the lab."""
+    import os
     import subprocess
+
+    # Pass config to tests via environment
+    env = os.environ.copy()
+    env["NIXOS_HOST"] = lab_config.nixos_host
+    env["NIXOS_USER"] = lab_config.nixos_user
+    env["LAB_PROFILE"] = lab_config.profile
+    env["TUNNEL_PORT"] = str(lab_config.tunnel_local_port)
 
     pytest_args = ["pytest", "-v"]
 
@@ -76,27 +77,27 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     pytest_args.append("tests/")
 
-    result = subprocess.run(pytest_args)
+    result = subprocess.run(pytest_args, env=env)
     return result.returncode
 
 
 def main() -> int:
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="Talos lab provisioning and testing tool")
+    parser = argparse.ArgumentParser(
+        description="Talos lab provisioning and testing tool",
+        epilog="Environment variables: NIXOS_HOST, NIXOS_USER, LAB_PROFILE, TUNNEL_PORT, SSH_KEY_PATH",
+    )
     parser.add_argument(
         "--host",
-        default="nixos-host",
-        help="nixos-host hostname or IP",
+        help="nixos-host hostname or IP (env: NIXOS_HOST)",
     )
     parser.add_argument(
         "--user",
-        default="gunstein",
-        help="SSH username",
+        help="SSH username (env: NIXOS_USER)",
     )
     parser.add_argument(
         "--profile",
-        default="lab1",
-        help="Lab profile (lab1, lab2, ...)",
+        help="Lab profile (env: LAB_PROFILE)",
     )
     parser.add_argument(
         "-v",
@@ -140,13 +141,20 @@ def main() -> int:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Build config from env vars, with CLI flags as overrides
+    lab_config = LabConfig.from_env(
+        nixos_host=args.host,
+        nixos_user=args.user,
+        profile=args.profile,
+    )
+
     try:
         if args.action == "deploy":
-            return cmd_deploy(args)
+            return cmd_deploy(args, lab_config)
         elif args.action == "provision":
-            return cmd_provision(args)
+            return cmd_provision(args, lab_config)
         elif args.action == "test":
-            return cmd_test(args)
+            return cmd_test(args, lab_config)
     except Exception as e:
         logger.error(f"Error: {e}")
         if args.verbose:
