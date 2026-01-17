@@ -127,6 +127,7 @@ fi
 log "Done."
 log ""
 log "Next steps:"
-log "  sudo ./scripts/doctor lab1        # Check prerequisites"
+log "  cd ${TARGET}"
+log "  sudo ./scripts/doctor lab1     # Check prerequisites"
 log "  sudo ./scripts/lab lab1 plan   # Preview what will happen"
 log "  sudo ./scripts/lab lab1 all    # Full setup"
