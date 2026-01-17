@@ -108,6 +108,15 @@ def cmd_test(args: argparse.Namespace, lab_config: LabConfig) -> int:
     """Run tests against the lab."""
     import os
     import subprocess
+    import sys
+
+    # Find tests directory (relative to this file or cwd)
+    tests_base = Path(__file__).parent.parent.parent / "tests"
+    if not tests_base.exists():
+        tests_base = Path("tests")
+
+    common_tests = tests_base / "common"
+    profile_tests = tests_base / lab_config.profile
 
     # Pass config to tests via environment
     env = os.environ.copy()
@@ -116,15 +125,27 @@ def cmd_test(args: argparse.Namespace, lab_config: LabConfig) -> int:
     env["LAB_PROFILE"] = lab_config.profile
     env["TUNNEL_PORT"] = str(lab_config.tunnel_local_port)
 
-    pytest_args = ["pytest", "-v"]
+    # Use same Python interpreter as labctl to ensure pytest is available
+    pytest_args = [sys.executable, "-m", "pytest", "-v"]
 
     if args.smoke:
         pytest_args.extend(["-m", "smoke"])
     if args.pattern:
         pytest_args.extend(["-k", args.pattern])
 
-    pytest_args.append("tests/")
+    # Add test directories: common + profile-specific
+    if common_tests.exists():
+        pytest_args.append(str(common_tests))
+    if profile_tests.exists():
+        pytest_args.append(str(profile_tests))
+    else:
+        logger.warning(f"No profile-specific tests found for '{lab_config.profile}'")
 
+    if len(pytest_args) == 4:  # Only "python -m pytest -v", no test dirs
+        logger.error("No test directories found")
+        return 1
+
+    logger.info(f"Running tests for profile: {lab_config.profile}")
     result = subprocess.run(pytest_args, env=env)
     return result.returncode
 

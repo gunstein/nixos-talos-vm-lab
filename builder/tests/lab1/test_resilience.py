@@ -1,4 +1,4 @@
-"""Resilience tests - verify recovery from failures."""
+"""Resilience tests - verify recovery from failures (lab1 specific)."""
 
 import time
 
