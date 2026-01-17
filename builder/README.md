@@ -1,17 +1,19 @@
 # Builder VM - Lab Provisioning and Testing
 
 This directory contains the Python tooling for automated lab provisioning and testing.
-It's designed to run on a separate "builder" VM that controls the nixos-host remotely.
+It's designed to run on a separate "builder" VM (nixos-control) that controls the nixos-host remotely.
 
 ## Architecture
 
 ```
-builder-vm (this code)
-├── Clone repo from GitHub
-├── Download Talos ISO
-├── Deploy to nixos-host via SSH/rsync
-├── Provision lab via SSH commands
-└── Run tests via SSH tunnel
+nixos-control (this code)
+├── labctl deploy
+│   ├── Copy repo to nixos-host via rsync
+│   ├── Run install.sh (NixOS rebuild)
+│   ├── Wipe existing lab
+│   └── Provision new lab
+└── labctl test
+    └── Run tests via SSH tunnel
 
 nixos-host
 └── Talos lab (VMs)
@@ -27,32 +29,35 @@ If setting up a new NixOS VM for builder:
 
 1. Install NixOS (minimal install is fine)
 2. Copy this repo to the VM
-3. Apply the NixOS configuration:
-
-```bash
-# Copy hardware-configuration.nix to hosts/
-cp /etc/nixos/hardware-configuration.nix ~/nixos-talos-vm-lab/hosts/
-
-# Build and switch
-sudo nixos-rebuild switch --flake ~/nixos-talos-vm-lab#builder-vm
-```
-
-4. Run the install script:
+3. Run the install script:
 
 ```bash
 cd ~/nixos-talos-vm-lab/builder
-./install.sh
+sudo ./install.sh
+```
+
+This will:
+- Apply the NixOS configuration (`builder-vm`)
+- Create Python venv with labctl
+- Create config file at `~/.config/labctl/config.toml`
+
+4. Edit config file with nixos-host IP:
+
+```bash
+nano ~/.config/labctl/config.toml
 ```
 
 ### Option 2: Existing system
 
 1. Ensure Python 3.11+ and pip are installed
-2. Run the install script:
+2. Install labctl:
 
 ```bash
 cd ~/nixos-talos-vm-lab/builder
-./install.sh
+pip install -e ".[test]"
 ```
+
+3. Create config file manually (see Configuration section)
 
 ### Configure SSH access
 
@@ -67,39 +72,73 @@ ssh-copy-id gunstein@<nixos-host-ip>
 ssh gunstein@<nixos-host-ip> "echo 'Connection OK'"
 ```
 
-### Set environment variables
+## Configuration
 
-Add to `~/.bashrc`:
+labctl uses a TOML config file at `~/.config/labctl/config.toml`:
+
+```toml
+[lab]
+profile = "lab1"
+local_repo = "~/nixos-talos-vm-lab"
+
+[nixos-host]
+host = "192.168.0.106"
+user = "gunstein"
+# port = 22
+# ssh_key = "~/.ssh/id_rsa"
+
+[tunnel]
+local_port = 8443
+remote_port = 443
+```
+
+View current configuration:
 
 ```bash
-export NIXOS_HOST=<nixos-host-ip>
-export NIXOS_USER=gunstein
-export LAB_PROFILE=lab1
+labctl config
 ```
+
+Environment variables can override config file values:
+- `NIXOS_HOST`, `NIXOS_USER`, `NIXOS_PORT`
+- `LAB_PROFILE`, `TUNNEL_PORT`, `SSH_KEY_PATH`
 
 ## Usage
 
-### Deploy and provision
+### Deploy lab (full workflow)
 
 ```bash
-# Full workflow: clone, download ISO, deploy, install, provision
+# Full deploy: wipe + install + provision (with confirmation)
 labctl deploy
-labctl provision all
 
-# Using local repo (skip git clone)
-labctl deploy --local ~/nixos-talos-vm-lab
-labctl provision all
+# Skip confirmation
+labctl deploy -y
+```
 
-# Or step by step
-labctl provision up       # Create VMs
-labctl provision status   # Check status
-labctl provision wipe     # Destroy lab
+### Partial operations
+
+```bash
+# Only copy repo and run install.sh (no wipe/provision)
+labctl deploy --install
+
+# Only wipe existing lab
+labctl deploy --wipe
+
+# Only provision (no wipe first)
+labctl deploy --provision
+```
+
+### Status and diagnostics
+
+```bash
+labctl status    # Show lab status
+labctl doctor    # Run health checks
+labctl config    # Show current configuration
 ```
 
 ### Run tests
 
 ```bash
-# All tests
+# All tests (common + profile-specific)
 labctl test
 
 # Smoke tests only
@@ -112,17 +151,34 @@ labctl test -k "demo"
 ### Options
 
 ```bash
-# Different host/user
-labctl --host 192.168.1.100 --user myuser provision all
+# Different host/user (overrides config file)
+labctl --host 192.168.1.100 --user myuser deploy
 
 # Different lab profile
-labctl --profile lab2 provision all
+labctl --profile lab2 deploy
 
 # Verbose output
-labctl -v provision all
+labctl -v deploy
 ```
 
-## Test categories
+## Test structure
+
+Tests are organized by profile:
+
+```
+tests/
+├── conftest.py         # Shared fixtures
+├── common/             # Tests for all profiles
+│   └── test_cluster.py # Nodes ready, system pods, Traefik
+└── lab1/               # Tests specific to lab1
+    ├── test_demo.py    # Demo app endpoints
+    ├── test_monitoring.py  # Grafana, Prometheus
+    └── test_resilience.py  # Pod recovery, data persistence
+```
+
+`labctl test` automatically runs `common/` + `<profile>/` tests.
+
+### Test categories
 
 - **smoke** - Basic checks that the lab is functioning
   - Nodes ready
@@ -133,16 +189,6 @@ labctl -v provision all
 - **resilience** - Recovery from failures
   - Pod deletion and recovery
   - Database data persistence
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NIXOS_HOST` | `nixos-host` | nixos-host hostname/IP |
-| `NIXOS_USER` | `gunstein` | SSH username |
-| `LAB_PROFILE` | `lab1` | Lab profile to use |
-| `TUNNEL_PORT` | `8443` | Local port for SSH tunnel |
-| `SSH_KEY_PATH` | (ssh-agent) | Path to SSH private key |
 
 ## Development
 
@@ -156,31 +202,30 @@ ruff check src/ tests/
 # Run type checker
 mypy src/
 
-# Run tests (requires nixos-host access)
-pytest -v tests/
+# Run tests locally
+labctl test
 ```
 
 ## Project structure
 
 ```
 builder/
-├── install.sh              # Setup script
+├── install.sh              # Setup script for nixos-control
 ├── pyproject.toml          # Project configuration
 ├── README.md               # This file
 ├── src/
 │   └── labctl/
 │       ├── __init__.py
 │       ├── cli.py          # Command-line interface
-│       ├── config.py       # Configuration dataclasses
+│       ├── config.py       # Configuration (TOML + env vars)
 │       ├── ssh.py          # SSH client and tunnel
 │       ├── deployer.py     # Repo deployment
 │       ├── provisioner.py  # Lab provisioning
 │       └── client.py       # HTTP client for lab services
 └── tests/
-    ├── __init__.py
     ├── conftest.py         # Pytest fixtures
-    ├── test_smoke.py       # Smoke tests
-    └── test_resilience.py  # Resilience tests
+    ├── common/             # Tests for all profiles
+    └── lab1/               # Tests for lab1 profile
 ```
 
 ## NixOS configuration

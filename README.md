@@ -960,6 +960,50 @@ sudo ./scripts/lab lab1 ingress
 - Traefik exposes Prometheus metrics (auto-scraped)
 
 
+## 12. Automated provisioning with nixos-control (optional)
+
+For automated lab provisioning and testing, you can set up a separate "nixos-control" VM that manages nixos-host remotely via SSH.
+
+### Setup nixos-control
+
+1. Create a new NixOS VM (minimal install)
+2. Copy this repo to the VM
+3. Run the builder install script:
+
+```bash
+cd ~/nixos-talos-vm-lab/builder
+sudo ./install.sh
+```
+
+4. Configure SSH access to nixos-host:
+
+```bash
+ssh-copy-id gunstein@<nixos-host-ip>
+```
+
+5. Edit the config file with nixos-host IP:
+
+```bash
+nano ~/.config/labctl/config.toml
+```
+
+### Usage from nixos-control
+
+```bash
+# Full deploy: wipe + install + provision
+labctl deploy
+
+# Run tests
+labctl test --smoke
+
+# Check status
+labctl status
+```
+
+See `builder/README.md` for full documentation.
+
+---
+
 ## Using the Makefile (optional)
 
 This repo ships with a small `Makefile` that provides convenient shortcuts for the existing scripts.
