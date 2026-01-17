@@ -161,7 +161,122 @@ rsync -a --delete -e "ssh -J user@jump-host" \
   nixos-talos-vm-lab/ gunstein@<nixos-host-ip>:~/nixos-talos-vm-lab/
 ```
 
-### 0.5 Snapshots (recommended)
+### 0.5 Alternative: Create NixOS-host VM on Proxmox
+
+If you're using Proxmox instead of libvirt/virt-install, follow these steps.
+
+#### Create VM in Proxmox
+
+**General:**
+- Name: `nixos-host`
+- VMID: (your choice)
+
+**OS:**
+- ISO: NixOS minimal ISO (download from https://nixos.org/download/)
+- Type: Linux
+
+**System:**
+- Machine: q35
+- BIOS: OVMF (UEFI)
+- SCSI Controller: VirtIO SCSI single
+- TPM: off
+
+**⚠️ IMPORTANT: Add EFI Disk**
+
+After creating the VM (or before starting install):
+1. VM → Hardware → Add → EFI Disk
+2. Storage: local-zfs (or your storage)
+3. Encryption: off
+4. Pre-enrolled keys: off
+
+This is equivalent to `nvram=..._VARS.fd` in virt-install.
+
+**Disk:**
+- Storage: local-zfs (or your storage)
+- Size: 40G
+- Bus/Device: SCSI (with VirtIO SCSI controller) or VirtIO Block
+- Discard: on
+- iothread: on
+
+**CPU:**
+- Type: host
+- Cores: 4
+
+**Memory:**
+- 4096 MB (minimum), 8192 MB recommended
+
+**Network:**
+- Model: VirtIO
+- Bridge: vmbr0
+
+**Display:**
+- VGA: VirtIO-GPU (or standard)
+
+**Boot Order:**
+- CD-ROM first during install
+- After install: Hard Disk first
+
+#### Install NixOS on Proxmox
+
+Boot from the NixOS ISO, then partition and format:
+
+```bash
+# Partition (GPT + EFI + root)
+sudo parted /dev/sda -- mklabel gpt
+sudo parted /dev/sda -- mkpart ESP fat32 1MiB 512MiB
+sudo parted /dev/sda -- set 1 esp on
+sudo parted /dev/sda -- mkpart primary ext4 512MiB 100%
+
+# Format
+sudo mkfs.fat -F32 /dev/sda1
+sudo mkfs.ext4 /dev/sda2
+
+# Mount
+sudo mount /dev/sda2 /mnt
+sudo mkdir -p /mnt/boot
+sudo mount /dev/sda1 /mnt/boot
+
+# Generate config
+sudo nixos-generate-config --root /mnt
+```
+
+Edit `/mnt/etc/nixos/configuration.nix`:
+
+```nix
+# Use systemd-boot (requires EFI Disk in Proxmox)
+boot.loader.systemd-boot.enable = true;
+boot.loader.efi.canTouchEfiVariables = true;
+
+# Enable SSH
+services.openssh.enable = true;
+
+# Create your user
+users.users.gunstein = {
+  isNormalUser = true;
+  extraGroups = [ "wheel" ];
+};
+```
+
+Install and reboot:
+
+```bash
+sudo nixos-install
+sudo reboot
+```
+
+**Before reboot in Proxmox:**
+- Remove ISO from CD/DVD drive
+- Set boot order: Hard Disk first
+
+After reboot, log in as root and set password for your user:
+
+```bash
+passwd gunstein
+```
+
+Then continue with [section 0.3](#03-download-the-talos-iso) to download the Talos ISO and set up the lab.
+
+### 0.6 Snapshots (recommended)
 
 Take snapshots at key points so you can restore quickly:
 
