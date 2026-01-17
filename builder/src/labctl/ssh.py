@@ -66,8 +66,13 @@ class SSHClient:
             self._client = None
             logger.info("Disconnected")
 
-    def run(self, command: str, timeout: int | None = None) -> CommandResult:
+    def run(self, command: str, timeout: int | None = None, stream: bool = False) -> CommandResult:
         """Execute a command on nixos-host.
+
+        Args:
+            command: Command to execute
+            timeout: Timeout in seconds
+            stream: If True, print output as it arrives (for long-running commands)
 
         Note: Reads stdout/stderr before getting exit status to avoid
         potential deadlock when command produces large output.
@@ -80,9 +85,57 @@ class SSHClient:
 
         stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
 
-        # Read all output first to avoid deadlock
-        stdout_data = stdout.read().decode()
-        stderr_data = stderr.read().decode()
+        if stream:
+            # Stream output line by line
+            stdout_lines = []
+            stderr_lines = []
+
+            # Set non-blocking
+            stdout.channel.setblocking(0)
+            stderr.channel.setblocking(0)
+
+            import select
+            import sys
+
+            while not stdout.channel.exit_status_ready():
+                readable, _, _ = select.select([stdout.channel, stderr.channel], [], [], 1.0)
+
+                if stdout.channel in readable:
+                    try:
+                        data = stdout.channel.recv(4096).decode()
+                        if data:
+                            sys.stdout.write(data)
+                            sys.stdout.flush()
+                            stdout_lines.append(data)
+                    except Exception:
+                        pass
+
+                if stderr.channel in readable:
+                    try:
+                        data = stderr.channel.recv_stderr(4096).decode()
+                        if data:
+                            sys.stderr.write(data)
+                            sys.stderr.flush()
+                            stderr_lines.append(data)
+                    except Exception:
+                        pass
+
+            # Read any remaining data
+            remaining_out = stdout.read().decode()
+            remaining_err = stderr.read().decode()
+            if remaining_out:
+                sys.stdout.write(remaining_out)
+                stdout_lines.append(remaining_out)
+            if remaining_err:
+                sys.stderr.write(remaining_err)
+                stderr_lines.append(remaining_err)
+
+            stdout_data = "".join(stdout_lines)
+            stderr_data = "".join(stderr_lines)
+        else:
+            # Read all output first to avoid deadlock
+            stdout_data = stdout.read().decode()
+            stderr_data = stderr.read().decode()
 
         # Now get exit status (safe after reading all output)
         exit_code = stdout.channel.recv_exit_status()

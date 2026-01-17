@@ -125,9 +125,13 @@ else
 fi
 
 log "Done."
-log ""
-log "Next steps:"
-log "  cd ${TARGET}"
-log "  sudo ./scripts/doctor lab1     # Check prerequisites"
-log "  sudo ./scripts/lab lab1 plan   # Preview what will happen"
-log "  sudo ./scripts/lab lab1 all    # Full setup"
+
+# Only show next steps if running interactively (not via labctl)
+if [[ "${LABCTL:-0}" != "1" ]]; then
+  log ""
+  log "Next steps:"
+  log "  cd ${TARGET}"
+  log "  sudo ./scripts/doctor lab1     # Check prerequisites"
+  log "  sudo ./scripts/lab lab1 plan   # Preview what will happen"
+  log "  sudo ./scripts/lab lab1 all    # Full setup"
+fi

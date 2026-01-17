@@ -16,18 +16,30 @@ class Provisioner:
         self.config = config
         self.ssh_client = ssh_client
 
-    def _run_lab_command(self, command: str, timeout: int | None = None) -> None:
-        """Run a lab.sh command."""
+    def _run_lab_command(
+        self, command: str, timeout: int | None = None, stream: bool = True
+    ) -> None:
+        """Run a lab.sh command.
+
+        Args:
+            command: Lab command to run (e.g., "all", "wipe")
+            timeout: Timeout in seconds
+            stream: If True, show output as it happens
+        """
         timeout = timeout or self.config.provision_timeout
-        full_command = f"cd {self.config.remote_repo_path} && sudo ./scripts/lab {self.config.profile} {command}"
+        full_command = f"cd {self.config.remote_repo_path} && sudo -n ./scripts/lab {self.config.profile} {command}"
 
         logger.info(f"Running: lab {self.config.profile} {command}")
-        result = self.ssh_client.run(full_command, timeout=timeout)
+        result = self.ssh_client.run(full_command, timeout=timeout, stream=stream)
 
         if not result.success:
-            raise RuntimeError(
-                f"Lab command '{command}' failed (exit={result.exit_code}):\n{result.stderr}"
-            )
+            # Show stderr if not already streamed
+            error_msg = f"Lab command '{command}' failed (exit={result.exit_code})"
+            if result.stderr and not stream:
+                error_msg += f":\n{result.stderr}"
+            if result.stdout and not stream:
+                error_msg += f"\nOutput:\n{result.stdout}"
+            raise RuntimeError(error_msg)
 
         logger.info(f"Command '{command}' completed successfully")
 

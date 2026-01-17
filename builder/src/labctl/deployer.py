@@ -98,13 +98,18 @@ class Deployer:
     def run_install_script(self) -> None:
         """Run install.sh on nixos-host."""
         logger.info("Running install.sh on nixos-host")
-        result = self.ssh_client.run_sudo(
-            f"~/nixos-talos-vm-lab/scripts/install.sh",
+        result = self.ssh_client.run(
+            f"sudo -n LABCTL=1 ~/nixos-talos-vm-lab/scripts/install.sh",
             timeout=self.lab_config.provision_timeout,
+            stream=True,
         )
         if not result.success:
-            raise RuntimeError(f"install.sh failed: {result.stderr}")
+            raise RuntimeError(f"install.sh failed (exit={result.exit_code})")
         logger.info("install.sh completed successfully")
+        logger.info("")
+        logger.info("Next steps (run from nixos-control):")
+        logger.info("  labctl provision all    # Full lab setup")
+        logger.info("  labctl provision wipe   # Destroy and start fresh")
 
     def full_deploy(self, local_repo_path: Path | None = None) -> None:
         """

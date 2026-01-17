@@ -33,7 +33,10 @@ in
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  networking.hostName = "nixos";
+  networking.hostName = "nixos-host";
+
+  # Allow passwordless sudo for wheel group (needed for labctl from builder-vm)
+  security.sudo.wheelNeedsPassword = false;
   networking.networkmanager.enable = true;
 
   # Lab hostnames for Traefik Ingress (via local proxy)

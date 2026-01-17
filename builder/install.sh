@@ -35,8 +35,8 @@ if [[ ! -f "$HW_DST" ]]; then
 fi
 
 # Run nixos-rebuild
-log "Running nixos-rebuild switch --flake ${REPO_ROOT}#builder-vm"
-nixos-rebuild switch --flake "${REPO_ROOT}#builder-vm"
+log "Running nixos-rebuild switch --flake path:${REPO_ROOT}#builder-vm"
+nixos-rebuild switch --flake "path:${REPO_ROOT}#builder-vm"
 
 # Now install Python package as the original user
 ORIG_USER="${SUDO_USER:-gunstein}"
@@ -45,8 +45,24 @@ ORIG_HOME=$(eval echo "~$ORIG_USER")
 log "Installing labctl package for user $ORIG_USER"
 cd "$SCRIPT_DIR"
 
-# Install as the original user
-sudo -u "$ORIG_USER" pip3 install --user -e ".[test]"
+# Create and use a virtual environment
+VENV_DIR="${ORIG_HOME}/.venv/labctl"
+if [[ ! -d "$VENV_DIR" ]]; then
+    log "Creating virtual environment at $VENV_DIR"
+    sudo -u "$ORIG_USER" python3 -m venv "$VENV_DIR"
+fi
+
+# Upgrade pip first
+log "Upgrading pip"
+sudo -u "$ORIG_USER" "$VENV_DIR/bin/pip" install --upgrade pip
+
+# Install in the venv
+sudo -u "$ORIG_USER" "$VENV_DIR/bin/pip" install -e ".[test]"
+
+# Create symlink to labctl in ~/.local/bin
+LOCALBIN="${ORIG_HOME}/.local/bin"
+sudo -u "$ORIG_USER" mkdir -p "$LOCALBIN"
+ln -sf "$VENV_DIR/bin/labctl" "$LOCALBIN/labctl"
 
 log ""
 log "Installation complete!"
